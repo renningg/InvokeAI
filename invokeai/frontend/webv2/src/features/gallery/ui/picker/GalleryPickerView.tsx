@@ -67,6 +67,7 @@ const haveSameSlots = (left: GallerySparseListing | null, right: GallerySparseLi
 
 export const GalleryPickerView = ({
   accept,
+  galleryOnly,
   openingScope,
   searchInputRef,
   selection,
@@ -74,6 +75,7 @@ export const GalleryPickerView = ({
   onPick,
 }: {
   accept: GalleryPickerAccept;
+  galleryOnly?: boolean;
   openingScope?: GalleryPickerOpeningScope;
   searchInputRef: RefObject<HTMLInputElement | null>;
   selection: GalleryPickerSelection;
@@ -521,7 +523,7 @@ export const GalleryPickerView = ({
   // Clips here rather than on the popover content, whose arrow sits outside its box.
   return (
     <Stack borderRadius="inherit" flex="1" gap="0" minH="0" overflow="hidden">
-      <input {...uploadInputProps} />
+      {!galleryOnly && <input {...uploadInputProps} />}
       <HStack gap="1" minW="0" pt="2" px="2">
         <Button
           _expanded={BOARD_BUTTON_EXPANDED_PROPS}
@@ -551,18 +553,20 @@ export const GalleryPickerView = ({
           idBase={idBase}
           onSelect={setView}
         />
-        <Tooltip content={uploadTarget.label}>
-          <IconButton
-            aria-busy={isUploading || undefined}
-            aria-label={uploadTarget.label}
-            color="fg.muted"
-            disabled={!uploadTarget.isAvailable || isUploading}
-            variant="ghost"
-            onClick={openUploadPicker}
-          >
-            <Icon as={UploadIcon} boxSize="3.5" />
-          </IconButton>
-        </Tooltip>
+        {!galleryOnly && (
+          <Tooltip content={uploadTarget.label}>
+            <IconButton
+              aria-busy={isUploading || undefined}
+              aria-label={uploadTarget.label}
+              color="fg.muted"
+              disabled={!uploadTarget.isAvailable || isUploading}
+              variant="ghost"
+              onClick={openUploadPicker}
+            >
+              <Icon as={UploadIcon} boxSize="3.5" />
+            </IconButton>
+          </Tooltip>
+        )}
       </HStack>
       {/* The same space below as above: the grid's own padding scrolls away, which would leave tiles under the field. */}
       <Box pb="1.5" pt="1.5" px="2">
@@ -649,7 +653,7 @@ export const GalleryPickerView = ({
                 ? t('widgets.gallery.noImagesMatch')
                 : t('widgets.gallery.picker.empty', { name: boardName })}
             </Text>
-            {!isSearching && uploadTarget.isAvailable ? (
+            {!galleryOnly && !isSearching && uploadTarget.isAvailable ? (
               <Button disabled={isUploading} variant="outline" onClick={openUploadPicker}>
                 <Icon as={UploadIcon} boxSize="3.5" />
                 {t('widgets.gallery.picker.upload')}

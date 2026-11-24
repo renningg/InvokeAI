@@ -18,6 +18,7 @@ import {
 import { SEED_MAX } from '@platform/core/seed';
 
 import type {
+  HostedH3ReferenceVideo,
   HostedH3Settings,
   HostedH3Status,
   Ltx2TargetResolution,
@@ -2534,6 +2535,9 @@ export const getHostedH3Ratios = ({ model, input }: HostedH3Settings): readonly 
     : FIXED_RATIOS;
 };
 
+export const reconcileHostedH3Ratio = (hosted: HostedH3Settings): HostedH3Settings =>
+  hosted.input === 'frames' || getHostedH3Ratios(hosted).includes(hosted.ratio) ? hosted : { ...hosted, ratio: '16:9' };
+
 export const getHostedH3ProviderIssue = (hosted: HostedH3Settings, status: HostedH3Status | null | undefined) => {
   if (!status?.configured) {
     return 'MiniMax video requires a configured API key in Model Manager → API Keys.';
@@ -2549,6 +2553,28 @@ export const getHostedH3ProviderIssue = (hosted: HostedH3Settings, status: Hoste
   }
   return null;
 };
+const hasHostedH3MediaShape = ({ width, height }: { width: number; height: number }) =>
+  Math.min(width, height) >= 256 && Math.max(width, height) <= 5760 && width / height >= 0.4 && width / height <= 2.5;
+
+export const getHostedH3ReferenceVideoIssue = (video: HostedH3ReferenceVideo, mediaOrigin?: string) => {
+  if (mediaOrigin === 'audio_upload') {
+    return 'Choose video footage for the MiniMax reference. Audio uploads have no picture.';
+  }
+  if (!video.video_name.toLowerCase().endsWith('.mp4')) {
+    return 'Choose an MP4 from the Gallery for the MiniMax video reference.';
+  }
+  if (!hasHostedH3MediaShape(video)) {
+    return 'MiniMax reference videos must be 256–5,760 pixels per side with an aspect ratio between 0.4 and 2.5.';
+  }
+  if (!(video.durationSeconds >= 2 && video.durationSeconds <= 15)) {
+    return 'MiniMax reference videos must be 2–15 seconds long.';
+  }
+  if (video.fps !== undefined && !(video.fps >= 23.976 && video.fps <= 60)) {
+    return 'MiniMax reference videos must have a frame rate between 23.976 and 60 fps.';
+  }
+  return null;
+};
+
 export const getHostedH3InputIssue = (settings: VideoWidgetValues, hosted: HostedH3Settings) => {
   if (!settings.positivePrompt.trim() || Array.from(settings.positivePrompt).length > 7000) {
     return 'MiniMax video requires a prompt of 1 to 7,000 characters.';
@@ -2566,30 +2592,24 @@ export const getHostedH3InputIssue = (settings: VideoWidgetValues, hosted: Hoste
   if (hosted.input === 'frames' && !settings.firstFrameImage && !settings.lastFrameImage) {
     return 'Select a first or last frame for MiniMax video.';
   }
-  if (
-    hosted.input === 'references' &&
-    (!settings.references.length ||
-      settings.references.length > 9 ||
-      settings.references.some((entry) => entry.kind !== 'image'))
-  ) {
-    return 'Select one to nine reference images for MiniMax video.';
-  }
   const images =
     hosted.input === 'frames'
       ? [settings.firstFrameImage, settings.lastFrameImage]
       : hosted.input === 'references'
-        ? settings.references.flatMap((ref) => (ref.kind === 'image' ? [ref.image] : []))
+        ? (settings.hostedReferenceImages ?? [])
         : [];
-  if (
-    images.some(
-      (image) =>
-        image &&
-        (Math.min(image.width, image.height) < 256 ||
-          Math.max(image.width, image.height) > 5760 ||
-          image.width / image.height < 0.4 ||
-          image.width / image.height > 2.5)
-    )
-  ) {
+  if (hosted.input === 'references') {
+    if ((!images.length && !settings.hostedReferenceVideo) || images.length > 9) {
+      return 'Choose up to nine reference images, one Gallery video, or both for MiniMax.';
+    }
+    if (settings.hostedReferenceVideo) {
+      const issue = getHostedH3ReferenceVideoIssue(settings.hostedReferenceVideo);
+      if (issue) {
+        return issue;
+      }
+    }
+  }
+  if (images.some((image) => image && !hasHostedH3MediaShape(image))) {
     return 'MiniMax images must be 256–5,760 pixels per side with an aspect ratio between 0.4 and 2.5.';
   }
   return null;

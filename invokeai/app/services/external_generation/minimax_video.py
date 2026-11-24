@@ -6,6 +6,7 @@ import base64
 import io
 import json
 import re
+import subprocess
 import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import closing, contextmanager
@@ -24,7 +25,9 @@ from invokeai.app.services.external_generation.errors import (
     ExternalProviderRequestError,
 )
 from invokeai.app.services.session_processor.session_processor_common import CanceledException
+from invokeai.app.util.mp4_metadata import read_mp4_movie_duration, read_mp4_video_frame_rate
 from invokeai.app.util.ssrf import build_guarded_session, validate_download_url
+from invokeai.app.util.video_audio import run_ffmpeg_process
 
 MiniMaxModel = Literal[
     "MiniMax-H3",
@@ -47,6 +50,9 @@ _REQUEST_TIMEOUT = 30
 _DOWNLOAD_TIMEOUT = 5 * 60
 MAX_VIDEO_BYTES = 256 * 1024 * 1024
 _MAX_IMAGE_BYTES = 30_000_000
+_MAX_REFERENCE_VIDEO_BYTES = 50_000_000
+_REFERENCE_DECODER_LIMITS = ("-threads", "1", "-max_pixels", str(5760 * 5760))
+_REFERENCE_TRACKS = ("-map", "0:V:0", "-map", "0:a:0?")
 _MAX_REQUEST_BYTES = 64_000_000
 
 
@@ -60,6 +66,15 @@ def minimax_video_region(base_url: str | None) -> MiniMaxRegion | None:
     return next((region for region, url in _API_ORIGINS.items() if url == origin), None)
 
 
+def require_minimax_video_region(base_url: str | None) -> MiniMaxRegion:
+    region = minimax_video_region(base_url)
+    if region is None:
+        raise ExternalProviderNotConfiguredError(
+            "MiniMax hosted video requires https://api.minimax.io or https://api.minimax.cn."
+        )
+    return region
+
+
 @dataclass(frozen=True)
 class MiniMaxVideoRequest:
     model: MiniMaxModel
@@ -71,6 +86,7 @@ class MiniMaxVideoRequest:
     first_frame: Callable[[], Image] | None = None
     last_frame: Callable[[], Image] | None = None
     reference_images: Sequence[Callable[[], Image]] = ()
+    reference_video: Callable[[], Path] | None = None
 
     def validate(self, region: MiniMaxRegion) -> None:
         if self.model not in get_args(MiniMaxModel) or (region == "cn" and self.model in _GLOBAL_ONLY):
@@ -92,30 +108,27 @@ class MiniMaxVideoRequest:
             raise ValueError("Unsupported MiniMax aspect ratio.")
         if len(self.reference_images) > 9:
             raise ValueError("MiniMax accepts up to nine reference images.")
+        has_references = bool(self.reference_images) or self.reference_video is not None
         if self.first_frame is not None or self.last_frame is not None:
-            if self.reference_images:
-                raise ValueError("MiniMax frame images and reference images cannot be combined.")
-        elif self.ratio == "adaptive" and (
-            not self.reference_images or self.model in ("MiniMax-H3-Lite", "MiniMax-H3-NC")
-        ):
+            if has_references:
+                raise ValueError("MiniMax frame images and reference media cannot be combined.")
+        elif self.ratio == "adaptive" and (not has_references or self.model in ("MiniMax-H3-Lite", "MiniMax-H3-NC")):
             raise ValueError("A specific aspect ratio is required for this MiniMax input and model.")
 
     def encode(self, region: MiniMaxRegion, is_canceled: Callable[[], bool]) -> bytes:
         self.validate(region)
         content: list[dict] = [{"type": "text", "text": self.prompt}]
-        images = [("first_frame", self.first_frame), ("last_frame", self.last_frame)]
-        images.extend(("reference_image", load_image) for load_image in self.reference_images)
-        total_encoded = 0
-        for role, load_image in images:
-            if load_image is None:
-                continue
-            _check_canceled(is_canceled)
-            # get_pil supplies an owned copy. Release each one before loading the next reference.
-            with closing(load_image()) as image:
-                encoded = _encode_image(image, _MAX_REQUEST_BYTES - total_encoded)
-            total_encoded += len(encoded)
+        images = [
+            (role, load)
+            for role, load in (("first_frame", self.first_frame), ("last_frame", self.last_frame))
+            if load is not None
+        ]
+        images.extend(("reference_image", load) for load in self.reference_images)
+        for role, _ in images:
+            content.append({"type": "image_url", "role": role, "image_url": {"url": "data:image/png;base64,"}})
+        if self.reference_video is not None:
             content.append(
-                {"type": "image_url", "role": role, "image_url": {"url": f"data:image/png;base64,{encoded}"}}
+                {"type": "video_url", "role": "reference_video", "video_url": {"url": "data:video/mp4;base64,"}}
             )
         payload = {
             "model": self.model,
@@ -125,19 +138,35 @@ class MiniMaxVideoRequest:
             "ratio": "adaptive" if self.first_frame is not None or self.last_frame is not None else self.ratio,
             "generate_audio": self.generate_audio,
         }
-        body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        if len(body) > _MAX_REQUEST_BYTES:
-            raise ValueError("The MiniMax request exceeds 64 MB with the encoded images.")
-        return body
+        # Base64 uses only single-byte, JSON-safe characters. Reserve the exact UTF-8 envelope
+        # (including the prompt, every media item's structure, and the data URI prefixes) first.
+        encoder = json.JSONEncoder(ensure_ascii=False, separators=(",", ":"))
+        remaining = _MAX_REQUEST_BYTES - len(encoder.encode(payload).encode("utf-8"))
+        for index, (_, load_image) in enumerate(images, start=1):
+            _check_canceled(is_canceled)
+            with closing(load_image()) as image:
+                encoded = _encode_image(image, remaining)
+            remaining -= len(encoded)
+            content[index]["image_url"]["url"] += encoded
+            del encoded
+        if self.reference_video is not None:
+            _check_canceled(is_canceled)
+            content[-1]["video_url"]["url"] += _encode_reference_video(self.reference_video(), remaining, is_canceled)
+        elif remaining < 0:
+            raise ValueError("The MiniMax request exceeds 64 MB.")
+        # Encode strings separately: a non-ASCII prompt need not widen a 64 MB Base64 string in memory.
+        return b"".join(chunk.encode("utf-8") for chunk in encoder.iterencode(payload))
 
 
-def validate_minimax_image_size(width: int, height: int) -> None:
+def validate_minimax_media_dimensions(width: int, height: int) -> None:
     if not (256 <= width <= 5760 and 256 <= height <= 5760 and 0.4 <= width / height <= 2.5):
-        raise ValueError("MiniMax images must be 256–5760 pixels per side with an aspect ratio of 0.4–2.5.")
+        raise ValueError(
+            "MiniMax images and reference videos must be 256–5760 pixels per side with an aspect ratio of 0.4–2.5."
+        )
 
 
 def _encode_image(image: Image, remaining: int) -> str:
-    validate_minimax_image_size(*image.size)
+    validate_minimax_media_dimensions(*image.size)
     # Only send pixels; gallery PNGs can carry private workflows, prompts or EXIF.
     with closing(image.convert("RGBA" if image.has_transparency_data else "RGB")) as pixels, io.BytesIO() as png:
         pixels.info.clear()
@@ -148,6 +177,117 @@ def _encode_image(image: Image, remaining: int) -> str:
         if 4 * ((size + 2) // 3) > remaining:
             raise ValueError("The MiniMax request exceeds 64 MB with the encoded images.")
         return base64.b64encode(png.getbuffer()).decode("ascii")
+
+
+def _encode_reference_video(src: Path, remaining: int, is_canceled: Callable[[], bool]) -> str:
+    """Prepare the authorized Gallery file for disclosure without forwarding its container metadata."""
+    try:
+        source_size = src.stat().st_size
+        if not 0 < source_size <= _MAX_REFERENCE_VIDEO_BYTES:
+            raise ValueError("A MiniMax reference video must be nonempty and at most 50 MB.")
+        with TemporaryDirectory(prefix="invokeai-minimax-reference-") as directory:
+            clip = Path(directory) / "reference.mp4"
+            # Force the local MOV/MP4 demuxer. Never auto-detect playlists or follow external data references.
+            source = ["-protocol_whitelist", "file", "-f", "mov", "-enable_drefs", "0", "-i", str(src)]
+            # A header-only output detects a second playable video or soundtrack, even if it has
+            # a different default disposition. Attached cover art is excluded by the V selector.
+            layout = [
+                *_REFERENCE_TRACKS,
+                "-map",
+                "0:V:1?",
+                "-map",
+                "0:a:1?",
+                "-c",
+                "copy",
+                "-frames:v",
+                "0",
+                "-frames:a",
+                "0",
+                "-f",
+                "framecrc",
+                "pipe:1",
+            ]
+            proc = run_ffmpeg_process(
+                [
+                    "-xerror",
+                    *_REFERENCE_DECODER_LIMITS,
+                    *source,
+                    *layout,
+                    *_REFERENCE_TRACKS,
+                    "-c",
+                    "copy",
+                    "-map_metadata",
+                    "-1",
+                    "-map_metadata:s",
+                    "-1",
+                    "-map_chapters",
+                    "-1",
+                    "-write_tmcd",
+                    "0",
+                    "-fs",
+                    str(_MAX_REFERENCE_VIDEO_BYTES + 1),
+                    str(clip),
+                ],
+                timeout=60,
+                is_canceled=is_canceled,
+                capture_stdout=True,
+            )
+            track_types = re.findall(rb"^#media_type \d+: (video|audio)\r?$", proc.stdout, re.MULTILINE)
+            if track_types.count(b"video") > 1 or track_types.count(b"audio") > 1:
+                raise ValueError("Export a reference clip with one video track and at most one audio track.")
+            if proc.returncode != 0 or track_types.count(b"video") != 1:
+                raise ValueError("The Gallery reference must be a readable MP4 or MOV video.")
+            size = clip.stat().st_size
+            if not 0 < size <= _MAX_REFERENCE_VIDEO_BYTES:
+                raise ValueError("The prepared MiniMax reference video exceeds 50 MB or is empty.")
+            if 4 * ((size + 2) // 3) > remaining:
+                raise ValueError("The MiniMax request exceeds 64 MB with the encoded reference media.")
+            duration = read_mp4_movie_duration(clip)
+            if duration is None or not 2 <= duration <= 15:
+                raise ValueError("A MiniMax reference video must last 2–15 seconds.")
+            fps = read_mp4_video_frame_rate(clip)
+            if fps is None or not 23.976 <= fps <= 60:
+                raise ValueError("A MiniMax reference video must be 23.976–60 fps.")
+            _validate_reference_streams(clip, is_canceled)
+            _check_canceled(is_canceled)
+            return base64.b64encode(clip.read_bytes()).decode("ascii")
+    except (OSError, subprocess.TimeoutExpired):
+        raise ValueError("The Gallery reference video could not be read or prepared.") from None
+
+
+def _validate_reference_streams(clip: Path, is_canceled: Callable[[], bool]) -> None:
+    # The bundled FFmpeg has no ffprobe. framecrc reports decoded dimensions without emitting
+    # raw pixels; a video packet proves the stream contains a decodable frame.
+    proc = run_ffmpeg_process(
+        [
+            "-xerror",
+            *_REFERENCE_DECODER_LIMITS,
+            "-codec_whitelist",
+            "h264,hevc,aac,mp3,mp3float",
+            "-i",
+            str(clip),
+            *_REFERENCE_TRACKS,
+            "-frames:v",
+            "1",
+            "-c:v",
+            "wrapped_avframe",
+            "-af",
+            "atrim=end_sample=1",
+            "-c:a",
+            "pcm_s16le",
+            "-f",
+            "framecrc",
+            "pipe:1",
+        ],
+        timeout=30,
+        is_canceled=is_canceled,
+        capture_stdout=True,
+    )
+    dimensions = re.search(rb"^#dimensions 0: (\d+)x(\d+)\r?$", proc.stdout, re.MULTILINE)
+    if proc.returncode or dimensions is None or not re.search(rb"^0,", proc.stdout, re.MULTILINE):
+        raise ValueError("MiniMax requires a decodable H.264 or HEVC video with optional AAC or MP3 audio.")
+    width, height = map(int, dimensions.groups())
+    validate_minimax_media_dimensions(width, height)
 
 
 def _check_canceled(is_canceled: Callable[[], bool]) -> None:
@@ -336,11 +476,7 @@ def generate_minimax_video(
     on_progress: Callable[[str], None] | None = None,
 ) -> Iterator[Path]:
     """Yield a temporary downloaded video until the caller completes ingest or raises."""
-    region = minimax_video_region(base_url)
-    if region is None:
-        raise ExternalProviderNotConfiguredError(
-            "MiniMax hosted video requires https://api.minimax.io or https://api.minimax.cn."
-        )
+    region = require_minimax_video_region(base_url)
     api_key = (api_key or "").strip()
     if not api_key or not api_key.isascii() or not api_key.isprintable() or " " in api_key:
         raise ExternalProviderNotConfiguredError("A valid MiniMax API key is required for hosted video.")

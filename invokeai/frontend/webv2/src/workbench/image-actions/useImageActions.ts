@@ -45,6 +45,7 @@ import {
   subscribeArchitectureCapabilities,
 } from '@features/models/architecturesStore';
 import { submitUtilityGraph, type UtilityGraphSubmission, UtilityQueueError } from '@features/queue/utility';
+import { getHostedH3ReferenceImagePatch, normalizeVideoWidgetValues } from '@features/video';
 import { copyImage } from '@platform/browser/clipboard';
 import { downloadBlob } from '@platform/browser/downloadBlob';
 import { createLogger } from '@platform/logging/logger';
@@ -140,6 +141,7 @@ export interface ImageActions extends GalleryItemActions {
   sendImageAsControl: (image: GalleryImage) => Promise<void>;
   setImagesStarred: (imageNames: string[], starred: boolean) => Promise<void>;
   useAsReferenceImage: (image: GalleryImage) => void;
+  sendImageToVideo: (image: GalleryImage) => void;
   useAsReferenceVideo: (item: GalleryVideoItem) => void;
   /** Clears the media the clip excludes. */
   useAsConditioningClip: (item: GalleryVideoItem, role: VideoConditioningRole) => void;
@@ -1455,6 +1457,26 @@ export const useImageActions = ({
           });
         }
       },
+      sendImageToVideo: (image) => {
+        const frame = { height: image.height, image_name: image.imageName, width: image.width };
+        const raw = getLatestVideoValues();
+        const hosted = raw.hostedH3 ? normalizeVideoWidgetValues(raw) : null;
+        const patch =
+          hosted?.hostedH3?.input === 'references'
+            ? getHostedH3ReferenceImagePatch(hosted, frame, true)
+            : { firstFrameImage: frame, references: [], sourceVideo: null };
+        if (!patch) {
+          notifications.add({
+            kind: 'info',
+            title: t('widgets.video.placement.imageNotPlaced'),
+            message: t('widgets.video.hosted.imagesFull'),
+          });
+          return;
+        }
+        openWorkbenchWidget('video', { preferredRegions: ['left'] });
+        commands.widgets.patchValues('video', patch, projectId);
+        generation.setSource('video');
+      },
       useAsReferenceVideo: (item) => {
         const placement = appendReferenceVideo({ models, video: item, videoValues: getLatestVideoValues() });
 
@@ -1462,11 +1484,14 @@ export const useImageActions = ({
         if (placement.status !== 'appended') {
           notifications.add({
             kind: 'info',
-            message: t(
-              placement.status === 'full'
-                ? 'widgets.video.placement.referenceFull'
-                : 'widgets.video.placement.referenceUnsupported'
-            ),
+            message:
+              placement.status === 'invalid'
+                ? placement.message
+                : t(
+                    placement.status === 'full'
+                      ? 'widgets.video.placement.referenceFull'
+                      : 'widgets.video.placement.referenceUnsupported'
+                  ),
             title: t('widgets.video.placement.referenceNotAdded'),
           });
           return;

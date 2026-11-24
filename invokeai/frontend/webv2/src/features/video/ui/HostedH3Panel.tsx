@@ -1,18 +1,24 @@
 /* oxlint-disable react-perf/jsx-no-new-function-as-prop -- the React Compiler memoizes field handlers, including those bound to image slots. */
+import type { GalleryItem } from '@features/gallery';
 import type { GenerateLora, ImageWithDims } from '@features/generation/contracts';
 import type { HostedH3Settings, VideoWidgetValues } from '@features/video/core/types';
 
 import { HStack, SimpleGrid, Stack, Switch, Text } from '@chakra-ui/react';
+import { GalleryMediaSlot } from '@features/gallery/mediaSlot';
 import { getDynamicPromptsConfig } from '@features/generation/settings';
 import { openModelManager, useMiniMaxStatus, useModelsUi } from '@features/models';
+import { createHostedH3ReferenceVideo, VIDEO_REFERENCE_MAX_IMAGES } from '@features/video/core/settings';
 import {
+  getHostedH3ReferenceVideoIssue,
   getHostedH3Models,
   getHostedH3MinDuration,
   getHostedH3Ratios,
   getHostedH3Resolutions,
+  reconcileHostedH3Ratio,
 } from '@features/video/core/videoPolicies';
 import { Button } from '@platform/ui/Button';
 import { Field } from '@platform/ui/Field';
+import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { VideoPromptFields } from './VideoFormFields';
@@ -20,18 +26,58 @@ import { VideoFrameImageField } from './VideoFrameImageField';
 import { VideoChoiceField } from './VideoModelField';
 import { useVideoUi } from './VideoUiContext';
 
+const VIDEO_ACCEPT = ['video'] as const;
 const REFERENCE_SLOTS = [1, 2, 3, 4, 5, 6, 7, 8, 9];
 const NO_LORAS: GenerateLora[] = [];
 
 export const HostedH3Panel = ({ values, hosted }: { values: VideoWidgetValues; hosted: HostedH3Settings }) => {
   const { t } = useTranslation();
-  const { patchValues, projectId, showPromptSyntaxHighlighting } = useVideoUi();
+  const { findInGallery, notifications, patchValues, projectId, showPromptSyntaxHighlighting } = useVideoUi();
   const { canManageModels } = useModelsUi();
   const status = useMiniMaxStatus(true);
   const region = status.data?.region ?? null;
   const models = getHostedH3Models(region);
   const resolutions = getHostedH3Resolutions(hosted.model, region);
   const ratios = getHostedH3Ratios(hosted);
+  const images = values.hostedReferenceImages ?? [];
+  const selectedVideo = values.hostedReferenceVideo;
+  const videoLabel = t('widgets.video.hosted.referenceVideo');
+  const videoSlotLabels = useMemo(
+    () => ({
+      choose: t('widgets.video.hosted.chooseSlot', { slot: videoLabel }),
+      remove: t('widgets.video.hosted.removeSlot', { slot: videoLabel }),
+      replace: t('widgets.video.hosted.replaceSlot', { slot: videoLabel, name: selectedVideo?.video_name }),
+    }),
+    [selectedVideo?.video_name, t, videoLabel]
+  );
+  const videoSlotValue = useMemo(
+    () =>
+      selectedVideo
+        ? {
+            kind: 'video' as const,
+            name: selectedVideo.video_name,
+            width: selectedVideo.width,
+            height: selectedVideo.height,
+          }
+        : null,
+    [selectedVideo]
+  );
+  const changeVideo = (item: GalleryItem | null) => {
+    if (item && item.kind !== 'video') {
+      return;
+    }
+    const video = item ? createHostedH3ReferenceVideo(item) : null;
+    const issue = video && getHostedH3ReferenceVideoIssue(video, item?.mediaOrigin);
+    if (issue) {
+      notifications.info(issue);
+      return;
+    }
+    patchValues((current) =>
+      current.hostedH3?.input === 'references' && current.hostedReferenceVideo?.video_name === selectedVideo?.video_name
+        ? { hostedReferenceVideo: video }
+        : {}
+    );
+  };
   const setOptions = (changes: Partial<HostedH3Settings>) =>
     patchValues((current) => {
       if (!current.hostedH3) {
@@ -43,9 +89,7 @@ export const HostedH3Panel = ({ values, hosted }: { values: VideoWidgetValues; h
         if (!getHostedH3Resolutions(next.model, region).includes(next.resolution)) {
           next.resolution = '768P';
         }
-        if (next.input !== 'frames' && !getHostedH3Ratios(next).includes(next.ratio)) {
-          next.ratio = '16:9';
-        }
+        return { hostedH3: reconcileHostedH3Ratio(next) };
       }
       return { hostedH3: next };
     });
@@ -61,29 +105,23 @@ export const HostedH3Panel = ({ values, hosted }: { values: VideoWidgetValues; h
       if (current.hostedH3?.input !== 'references') {
         return {};
       }
-      const references = [...current.references];
-      const old = references[index];
+      const next = [...(current.hostedReferenceImages ?? [])];
       if (original === null) {
-        if (!image || references.length >= 9) {
+        if (!image || next.length >= VIDEO_REFERENCE_MAX_IMAGES) {
           return {};
         }
-        references.push({ kind: 'image', detail: 'match', image });
+        next.push(image);
       } else {
-        if (!old || (old.kind === 'image' ? old.image.image_name : old.clip.video_name) !== original) {
+        if (next[index]?.image_name !== original) {
           return {};
         }
         if (image) {
-          references[index] = { kind: 'image', detail: 'match', image };
+          next[index] = image;
         } else {
-          references.splice(index, 1);
+          next.splice(index, 1);
         }
       }
-      return {
-        references,
-        ...(references.length
-          ? { firstFrameImage: null, lastFrameImage: null, sourceVideo: null, conditioningClip: null }
-          : {}),
-      };
+      return { hostedReferenceImages: next };
     });
   const minimum = getHostedH3MinDuration(hosted.model);
   const hasModel = models.some((id) => id === hosted.model);
@@ -185,35 +223,39 @@ export const HostedH3Panel = ({ values, hosted }: { values: VideoWidgetValues; h
         )}
         {hosted.input === 'references' && (
           <Stack gap="2">
-            {REFERENCE_SLOTS.slice(0, values.references.length + 1).map((number) => {
+            <Field label={videoLabel} helpText={t('widgets.video.hosted.referenceVideoBilling')}>
+              <GalleryMediaSlot
+                accept={VIDEO_ACCEPT}
+                galleryOnly
+                dropId="hosted-h3-reference-video"
+                labels={videoSlotLabels}
+                value={videoSlotValue}
+                onChange={changeVideo}
+                onFind={
+                  selectedVideo ? () => findInGallery({ kind: 'video', name: selectedVideo.video_name }) : undefined
+                }
+              />
+            </Field>
+            {values.references.some((entry) => entry.kind === 'video') && (
+              <Text color="fg.muted" fontSize="sm">
+                {t('widgets.video.hosted.localReferenceClips')}
+              </Text>
+            )}
+            {REFERENCE_SLOTS.slice(0, images.length + 1).map((number) => {
               const index = number - 1;
-              const entry = values.references[index];
-              const name = entry ? (entry.kind === 'image' ? entry.image.image_name : entry.clip.video_name) : null;
+              const image = images[index];
+              const name = image?.image_name ?? null;
               const slotLabel = t('widgets.video.hosted.reference', { n: number });
               // A positional key keeps the focused chooser mounted when this image changes or its successor moves up.
               return (
-                <Field key={number} label={entry ? slotLabel : t('widgets.video.hosted.addReference')}>
+                <Field key={number} label={image ? slotLabel : t('widgets.video.hosted.addReference')}>
                   <VideoFrameImageField
                     dropId={`hosted-h3-ref-${number}`}
                     dropLabel={t('widgets.video.dropReference')}
                     slotLabel={slotLabel}
-                    image={entry?.kind === 'image' ? entry.image : null}
+                    image={image ?? null}
                     onChange={(image) => changeReference(index, name, image)}
                   />
-                  {entry?.kind === 'video' && (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={(event) => {
-                        event.currentTarget.parentElement
-                          ?.querySelector<HTMLElement>('button[aria-haspopup="dialog"]')
-                          ?.focus();
-                        changeReference(index, name, null);
-                      }}
-                    >
-                      {t('widgets.video.hosted.removeClip', { name })}
-                    </Button>
-                  )}
                 </Field>
               );
             })}

@@ -3,7 +3,7 @@ import type { GenerationModelCatalogItem, MainModelConfig } from '@features/gene
 import { describe, expect, it } from 'vitest';
 
 import { compileVideoGraph } from './graph';
-import { normalizeVideoWidgetValues } from './settings';
+import { DEFAULT_HOSTED_H3, normalizeVideoWidgetValues } from './settings';
 import {
   getAcceleratorToggleResult,
   getVideoModelPolicy,
@@ -336,6 +336,44 @@ describe('syncVideoWidgetValuesWithModels', () => {
 });
 
 describe('getVideoWidgetValidationReasons', () => {
+  it('validates only the selected hosted input mode, with a whole clip alone or beside up to nine pictures', () => {
+    const clip = { video_name: 'ref.mp4', durationSeconds: 2, fps: 23.976, height: 256, width: 640 };
+    const values = {
+      ...createDefaultVideoWidgetValues(),
+      positivePrompt: 'Follow the movement',
+      hostedH3: { ...DEFAULT_HOSTED_H3, input: 'references' as const },
+      hostedReferenceVideo: clip,
+    };
+    expect(getVideoWidgetValidationReasons(values)).toEqual([]);
+    expect(getVideoWidgetValidationReasons({ ...values, hostedReferenceVideo: { ...clip, fps: undefined } })).toEqual(
+      []
+    );
+    const image = { image_name: 'ref.png', height: 256, width: 256 };
+    expect(getVideoWidgetValidationReasons({ ...values, hostedReferenceImages: Array(9).fill(image) })).toEqual([]);
+    expect(getVideoWidgetValidationReasons({ ...values, hostedReferenceImages: Array(10).fill(image) })).toHaveLength(
+      1
+    );
+    expect(getVideoWidgetValidationReasons({ ...values, hostedReferenceVideo: null })).toHaveLength(1);
+    for (const changes of [
+      { durationSeconds: 1.99 },
+      { durationSeconds: 15.01 },
+      { fps: 23.97 },
+      { fps: 60.01 },
+      { width: 641 },
+      { height: 255 },
+      { width: 5761 },
+    ]) {
+      const invalid = { ...values, hostedReferenceVideo: { ...clip, ...changes } };
+      expect(getVideoWidgetValidationReasons(invalid)).toHaveLength(1);
+      expect(getVideoWidgetValidationReasons({ ...invalid, hostedH3: { ...values.hostedH3, input: 'text' } })).toEqual(
+        []
+      );
+    }
+    expect(getVideoWidgetValidationReasons({ ...values, hostedH3: { ...values.hostedH3, input: 'frames' } })).toEqual([
+      'Select a first or last frame for MiniMax video.',
+    ]);
+  });
+
   it('requires a model first', () => {
     const values = { ...createDefaultVideoWidgetValues(), model: null };
 

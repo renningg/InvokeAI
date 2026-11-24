@@ -1062,6 +1062,46 @@ describe('adopting a project from another realm', () => {
     expect(getProjectWidgetValues(normalized, 'gallery')).not.toHaveProperty('liveFollowPausedAt');
   });
 
+  it('adopts the images of an older hosted reference project once, before later local edits', () => {
+    const image = { image_name: 'legacy.png', width: 1024, height: 768 };
+    const initial = workbenchReducer(createInitialWorkbenchState(), {
+      type: 'toggleRegionWidget',
+      widgetId: 'video',
+      region: 'left',
+    });
+    const project = getActiveProject(initial);
+    const instance = project.widgetInstances.video!;
+    const stored = {
+      ...instance.state.values,
+      hostedH3: { input: 'references', model: 'MiniMax-H3' },
+      references: [{ kind: 'image', detail: 'match', image }],
+    };
+    const currentWrite = workbenchReducer(initial, { type: 'patchWidgetValues', widgetId: 'video', values: stored });
+    expect(getProjectWidgetValues(getActiveProject(currentWrite), 'video').hostedReferenceImages).toEqual([]);
+    const loaded = normalizeWorkbenchProject({
+      ...project,
+      widgetInstances: {
+        ...project.widgetInstances,
+        video: { ...instance, state: { ...instance.state, values: stored } },
+      },
+    });
+    expect(getProjectWidgetValues(loaded, 'video').hostedReferenceImages).toEqual([image]);
+    const edited = workbenchReducer(
+      { ...initial, projects: [loaded] },
+      {
+        type: 'patchWidgetValues',
+        widgetId: 'video',
+        values: {
+          hostedH3: undefined,
+          references: [{ kind: 'image', detail: 'match', image: { ...image, image_name: 'later-local.png' } }],
+        },
+      }
+    );
+    expect(
+      getProjectWidgetValues(normalizeWorkbenchProject(getActiveProject(edited)), 'video').hostedReferenceImages
+    ).toEqual([image]);
+  });
+
   it('carries the iteration count workflow runs borrowed from Generate over to the workflow widget once', () => {
     const workflowValuesOf = (candidate: Project) => getProjectWidgetValues(candidate, 'workflow');
     const withoutWorkflowCount = (candidate: Project): Project => {
@@ -2561,6 +2601,26 @@ describe('workbenchReducer Phase 5 generation flow', () => {
             ],
           },
         },
+      });
+
+      state = workbenchReducer(state, {
+        type: 'patchWidgetValues',
+        widgetId: 'video',
+        values: {
+          hostedH3: {
+            model: 'MiniMax-H3',
+            input: 'references',
+            resolution: '768P',
+            duration: 5,
+            ratio: '16:9',
+            generateAudio: true,
+          },
+          hostedReferenceVideo: { video_name: 'movement.mp4', width: 1024, height: 768, durationSeconds: 5 },
+        },
+      });
+      const [referenceRun] = submit(true, 'global', 'global');
+      expect(referenceRun?.snapshot.backendSubmission).toMatchObject({
+        graph: { nodes: { video_output: { reference_video: { video_name: 'movement.mp4' }, reference_images: [] } } },
       });
     });
 

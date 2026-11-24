@@ -3,7 +3,7 @@ import type { WorkbenchQueueItem } from '@workbench/queueHistoryContracts';
 
 import { cloneGenerateWidgetValues, normalizeGenerateWidgetValues } from '@features/generation/settings';
 import { boundSubmissionRetryMessage, MAX_QUEUE_BATCH_ITEMS } from '@features/queue';
-import { cloneVideoWidgetValues, normalizeVideoWidgetValues } from '@features/video';
+import { cloneVideoWidgetValues, migrateLegacyHostedH3Images, normalizeVideoWidgetValues } from '@features/video';
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -157,7 +157,7 @@ export const normalizeRestoredQueueItem = (value: unknown): WorkbenchQueueItem |
         };
       }
     } else if (snapshot.sourceId === 'video' && isRecord(rawRecall?.videoValues)) {
-      const values = normalizeVideoWidgetValues(rawRecall.videoValues);
+      const values = normalizeVideoWidgetValues(migrateLegacyHostedH3Images(rawRecall.videoValues));
       if (values) {
         recall = { videoValues: cloneVideoWidgetValues(values) };
       }

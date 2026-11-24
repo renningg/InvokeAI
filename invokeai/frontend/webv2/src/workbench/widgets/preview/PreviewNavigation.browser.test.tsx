@@ -2078,6 +2078,7 @@ const createItemMenuActions = (overrides: Partial<ImageActions>): ImageActions =
   sendToInitialVideo: vi.fn(),
   useAsReferenceImage: vi.fn(),
   useAsConditioningClip: vi.fn(),
+  sendImageToVideo: vi.fn(),
   useAsReferenceVideo: vi.fn(),
   ...overrides,
 });

@@ -80,6 +80,7 @@ const GalleryDragEndMonitor = ({ onDragEnd }: { onDragEnd: (event: DragEndEvent)
  */
 export const GalleryMediaSlot = ({
   accept,
+  galleryOnly,
   busy = false,
   layout = 'row',
   disabled = false,
@@ -93,6 +94,7 @@ export const GalleryMediaSlot = ({
   onUploadFile,
 }: {
   accept: GalleryPickerAccept;
+  galleryOnly?: boolean;
   /** The consumer is still acting on a pick (storing it elsewhere, say); the slot shows it working and waits. */
   busy?: boolean;
   /**
@@ -284,7 +286,7 @@ export const GalleryMediaSlot = ({
   return (
     <Stack gap="2">
       <Box ref={setNodeRef} className="group" position="relative">
-        <GalleryPickerPopover accept={accept} label={labels.choose} onPick={handlePick}>
+        <GalleryPickerPopover accept={accept} galleryOnly={galleryOnly} label={labels.choose} onPick={handlePick}>
           <DropZone
             ref={triggerRef}
             as="button"

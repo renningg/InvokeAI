@@ -97776,6 +97776,22 @@
             "title": "Reference Images",
             "type": "array"
           },
+          "reference_video": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/VideoField"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Gallery reference video, optionally combined with reference images",
+            "field_kind": "input",
+            "input": "any",
+            "orig_default": null,
+            "orig_required": false
+          },
           "type": {
             "const": "minimax_h3_video_generation",
             "default": "minimax_h3_video_generation",
@@ -97788,7 +97804,7 @@
         "tags": ["minimax", "h3", "external", "video"],
         "title": "MiniMax H3 Hosted Video",
         "type": "object",
-        "version": "1.0.0",
+        "version": "1.1.0",
         "output": {
           "$ref": "#/components/schemas/VideoOutput"
         }

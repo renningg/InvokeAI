@@ -14,6 +14,7 @@ import {
   getGalleryCompareImage,
   getSelectedGalleryItemFromValues,
 } from '@features/gallery/contracts';
+import { getConditioningClipPatch, isVideoConditioningClip } from '@features/video';
 import { isSlotUnclaimed, selectUnclaimedEntries } from '@platform/state/compareAndSwapRollback';
 import { getProjectWidgetValues } from '@workbench/widgetState';
 
@@ -32,6 +33,9 @@ const TRACKED_GALLERY_REMOVAL_FIELDS: ReadonlyArray<{ key: string; widgetId: Wid
   { key: 'lastFrameImage', widgetId: 'video' },
   { key: 'references', widgetId: 'video' },
   { key: 'sourceVideo', widgetId: 'video' },
+  { key: 'hostedReferenceVideo', widgetId: 'video' },
+  { key: 'hostedReferenceImages', widgetId: 'video' },
+  { key: 'conditioningClip', widgetId: 'video' },
 ];
 
 /**
@@ -145,13 +149,21 @@ export const selectRestorableGalleryWidgetPatches = (
     const isOccupied = (value: unknown): boolean =>
       Array.isArray(value) ? value.length > 0 : value !== null && value !== undefined;
 
-    if (
-      rivals.length > 0 &&
-      isOccupied(entry.before) &&
-      rivals.some((rival) =>
-        isOccupied(getProjectWidgetValues(projectsById.get(entry.projectId)!, entry.widgetId)[rival.rivalKey])
-      )
-    ) {
+    const current = getProjectWidgetValues(projectsById.get(entry.projectId)!, entry.widgetId);
+    const conditioning = entry.key === 'conditioningClip' ? entry.before : current.conditioningClip;
+    if (entry.widgetId === 'video' && isVideoConditioningClip(conditioning)) {
+      // An audio-role clip can coexist with frames. Consult the same exclusions as a fresh clip placement.
+      const excluded = Object.keys(getConditioningClipPatch(conditioning)).filter((key) => key !== 'conditioningClip');
+      if (
+        entry.key === 'conditioningClip'
+          ? excluded.some((key) => isOccupied(current[key]))
+          : excluded.includes(entry.key)
+      ) {
+        continue;
+      }
+    }
+
+    if (rivals.length > 0 && isOccupied(entry.before) && rivals.some((rival) => isOccupied(current[rival.rivalKey]))) {
       continue;
     }
 

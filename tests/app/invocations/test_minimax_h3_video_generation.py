@@ -7,7 +7,7 @@ import imageio_ffmpeg
 import pytest
 from PIL import Image
 
-from invokeai.app.invocations.fields import BoardField, ImageField, MetadataField
+from invokeai.app.invocations.fields import BoardField, ImageField, MetadataField, VideoField
 from invokeai.app.invocations.minimax_h3 import minimax_h3_video_generation as hosted
 from invokeai.app.services.external_generation import minimax_video
 from invokeai.app.services.image_files.image_files_disk import DiskImageFileStorage
@@ -20,6 +20,7 @@ from invokeai.app.services.shared.invocation_context import (
     ImagesInterface,
     InvocationContextData,
     UtilInterface,
+    VideosInterface,
     build_invocation_context,
 )
 from invokeai.app.services.urls.urls_default import LocalUrlService
@@ -90,6 +91,23 @@ def _image(invoker: Invoker, owner: str, color: str) -> ImageField:
         user_id=owner,
     )
     return ImageField(image_name=image.image_name)
+
+
+def _video_record(invoker: Invoker, owner: str, metadata: str | None = None) -> VideoField:
+    name = "reference.mp4"
+    invoker.services.video_records.save(
+        video_name=name,
+        video_origin=ResourceOrigin.EXTERNAL,
+        video_category=ImageCategory.GENERAL,
+        width=320,
+        height=256,
+        duration=2.0,
+        fps=None,
+        has_workflow=False,
+        user_id=owner,
+        metadata=metadata,
+    )
+    return VideoField(video_name=name)
 
 
 @pytest.mark.ffmpeg
@@ -165,17 +183,24 @@ def test_generated_video_reaches_owners_gallery_with_audio_thumbnail_and_metadat
     }
 
 
-@pytest.mark.parametrize("private_resource", ["board", "first_frame", "reference_images"])
+@pytest.mark.parametrize("private_resource", ["board", "first_frame", "reference_images", "reference_video"])
 def test_inaccessible_gallery_input_or_output_is_rejected_before_billing(
     invoker: Invoker, owner: str, monkeypatch: pytest.MonkeyPatch, private_resource: str
 ) -> None:
     other = invoker.services.users.create(UserCreateRequest(email="other@example.com", password="Test-Pass-246"))
+    inputs = {}
     if private_resource == "board":
+        inputs["reference_video"] = _video_record(invoker, owner)
+        monkeypatch.setattr(VideosInterface, "get_dto", lambda *args: pytest.fail("Read a clip before board access"))
         private = BoardField(board_id=invoker.services.board_records.save("Private", other.user_id).board_id)
+    elif private_resource == "reference_video":
+        private = _video_record(invoker, other.user_id)
+        monkeypatch.setattr(VideosInterface, "get_path", lambda *args: pytest.fail("Opened a private clip"))
     else:
         image = _image(invoker, other.user_id, "red")
         private = [image] if private_resource == "reference_images" else image
-    node = hosted.MiniMaxH3VideoGenerationInvocation(prompt="animate", **{private_resource: private})
+    inputs[private_resource] = private
+    node = hosted.MiniMaxH3VideoGenerationInvocation(prompt="animate", **inputs)
     monkeypatch.setattr(minimax_video, "_submit", lambda *args: pytest.fail("Submitted before authorization"))
     with pytest.raises(PermissionError, match="not authorized"):
         _run(invoker, node, owner)
@@ -198,16 +223,20 @@ def test_non_video_result_never_reaches_the_gallery(
     assert invoker.services.gallery.get_item_names(user_id=owner, media_kind="video").item_names == []
 
 
-def test_queued_region_change_is_rejected_before_reading_gallery_images_or_submitting(
+def test_queued_region_change_is_rejected_before_reading_gallery_inputs_or_submitting(
     invoker: Invoker, owner: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     node = hosted.MiniMaxH3VideoGenerationInvocation(
-        prompt="animate", expected_region="global", first_frame=ImageField(image_name="private-frame.png")
+        prompt="animate",
+        expected_region="global",
+        reference_images=[ImageField(image_name="private-frame.png")],
+        reference_video=VideoField(video_name="private-clip.mp4"),
     )
     invoker.services.configuration.update_config(
         {"external_minimax_base_url": "https://api.minimax.cn", "external_minimax_api_key": "cn-key"}
     )
     monkeypatch.setattr(ImagesInterface, "get_dto", lambda *args: pytest.fail("Read an image after the region changed"))
+    monkeypatch.setattr(VideosInterface, "get_dto", lambda *args: pytest.fail("Read a video after the region changed"))
     monkeypatch.setattr(minimax_video, "_submit", lambda *args: pytest.fail("Submitted to a different region"))
     with pytest.raises(hosted.ExternalProviderNotConfiguredError, match="region changed"):
         _run(invoker, node, owner)
@@ -288,3 +317,51 @@ def test_cancellation_skips_remaining_media_inspection_and_gallery_save(
         _run(invoker, hosted.MiniMaxH3VideoGenerationInvocation(prompt="animate"), owner)
     assert completed[-1] == cancel_after
     assert invoker.services.gallery.get_item_names(user_id=owner, media_kind="video").total_count == 0
+
+
+def test_wrapped_audio_upload_is_rejected_before_opening_any_reference(
+    invoker: Invoker, owner: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    audio = _video_record(invoker, owner, metadata='{"media_origin":"audio_upload"}')
+    node = hosted.MiniMaxH3VideoGenerationInvocation(
+        prompt="animate", reference_video=audio, reference_images=[_image(invoker, owner, "blue")]
+    )
+    monkeypatch.setattr(VideosInterface, "get_path", lambda *a: pytest.fail("Opened a waveform video"))
+    monkeypatch.setattr(ImagesInterface, "get_pil", lambda *a: pytest.fail("Decoded an image"))
+    monkeypatch.setattr(minimax_video, "_submit", lambda *a: pytest.fail("Submitted an audio upload"))
+    with pytest.raises(ValueError, match="audio upload"):
+        _run(invoker, node, owner)
+
+
+@pytest.mark.ffmpeg
+def test_authorized_gallery_video_with_unknown_recorded_fps_is_resolved_for_the_paid_request(
+    invoker: Invoker, owner: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    video = _video_record(invoker, owner)
+    source = invoker.services.videos.get_path(video.video_name)
+    subprocess.run(
+        [
+            imageio_ffmpeg.get_ffmpeg_exe(),
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=s=320x256:r=24:d=2",
+            "-c:v",
+            "libx264",
+            source,
+        ],
+        check=True,
+        timeout=30,
+    )
+    node = hosted.MiniMaxH3VideoGenerationInvocation(prompt="animate", reference_video=video)
+
+    def capture(session, origin, body, is_canceled):
+        assert b'"role":"reference_video"' in body and b"data:video/mp4;base64," in body
+        assert video.video_name.encode() not in body
+        raise hosted.ExternalProviderRequestError("Captured authorized submission")
+
+    monkeypatch.setattr(minimax_video, "_submit", capture)
+    with pytest.raises(hosted.ExternalProviderRequestError, match="Captured authorized submission"):
+        _run(invoker, node, owner)

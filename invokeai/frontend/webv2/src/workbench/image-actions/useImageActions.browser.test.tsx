@@ -227,7 +227,7 @@ vi.mock('@workbench/WorkbenchContext', () => {
       setItemMultiSelection: (...args: unknown[]) => mocks.gallerySetItemMultiSelection(...args),
       setCompareImage: vi.fn(),
     },
-    generation: { patchSettings: vi.fn() },
+    generation: { patchSettings: vi.fn(), setSource: vi.fn() },
     projects: { create: (...args: unknown[]) => mocks.createProject(...args) },
     notifications: {
       add: (...args: unknown[]) => mocks.notificationsAdd(...args),
@@ -479,6 +479,34 @@ describe('canvas destinations', () => {
     starred: false,
     thumbnailUrl: `/thumb-${imageName}`,
     width: 512,
+  });
+
+  it('adds a Gallery image beside a hosted clip without changing the local conditioning clip', () => {
+    const project = makeMockProject('project-1');
+    const values = {
+      hostedH3: { model: 'MiniMax-H3', input: 'references' },
+      hostedReferenceVideo: { video_name: 'whole.mp4', width: 1280, height: 720, durationSeconds: 4 },
+      conditioningClip: {
+        clip: { video_name: 'local.mp4', width: 1280, height: 720, numFrames: 96, fps: 24 },
+        fpsKnown: true,
+        role: 'audio',
+      },
+    };
+    const withVideo = {
+      ...project,
+      widgetInstances: {
+        ...project.widgetInstances,
+        video: { ...project.widgetInstances.gallery, id: 'video', typeId: 'video', state: { id: 'video', values } },
+      },
+    };
+    mocks.getSnapshot.mockReturnValue({ activeProject: withVideo, projects: [withVideo], scopedDefaults: {} });
+    const image = galleryImage('sky.png');
+    act(() => actionsRef.current?.sendImageToVideo(image));
+    expect(mocks.galleryWidgetsPatchValues).toHaveBeenCalledExactlyOnceWith(
+      'video',
+      { hostedReferenceImages: [{ image_name: 'sky.png', width: image.width, height: image.height }] },
+      'project-1'
+    );
   });
 
   it('reports the new canvas and opens it in the center once the images land', async () => {

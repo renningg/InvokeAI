@@ -1,12 +1,14 @@
 import base64
 import io
 import json
+import subprocess
 import tempfile
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+import imageio_ffmpeg
 import pytest
 import requests
 from PIL import Image
@@ -18,6 +20,7 @@ from invokeai.app.services.external_generation.errors import (
     ExternalProviderRequestError,
 )
 from invokeai.app.services.session_processor.session_processor_common import CanceledException
+from invokeai.app.util.mp4_metadata import read_mp4_tags
 
 _GLOBAL = "https://api.minimax.io"
 _CHINA = "https://api.minimax.cn"
@@ -188,6 +191,10 @@ def test_incompatible_reference_roles_dimensions_and_size_are_rejected_before_su
     image = Image.new("RGB", (256, 256))
     for changes in (
         {"first_frame": image.copy, "reference_images": [image.copy]},
+        {"first_frame": image.copy, "reference_video": lambda: pytest.fail("Loaded incompatible clip")},
+        {"last_frame": image.copy, "reference_video": lambda: pytest.fail("Loaded incompatible clip")},
+        {"model": "MiniMax-H3-Lite", "ratio": "adaptive", "reference_video": lambda: pytest.fail("Loaded clip")},
+        {"model": "MiniMax-H3-NC", "ratio": "adaptive", "reference_video": lambda: pytest.fail("Loaded clip")},
         {"reference_images": [image.copy] * 10},
         {"reference_images": [image.copy], "model": "MiniMax-H3-Lite", "ratio": "adaptive"},
         {"reference_images": [image.copy], "model": "MiniMax-H3-NC", "ratio": "adaptive"},
@@ -333,3 +340,260 @@ def test_caller_ingest_failure_cleans_up_the_download(http, tmp_path) -> None:
         assert path.exists()
         raise ValueError("invalid media")
     assert not list(tmp_path.iterdir())
+
+
+def _ffmpeg(*args: str) -> bytes:
+    return subprocess.run(
+        [imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-loglevel", "error", *args],
+        capture_output=True,
+        check=True,
+        timeout=30,
+    ).stdout
+
+
+@pytest.fixture
+def tagged_reference(tmp_path: Path) -> Path:
+    # The chapter creates an extra text/data track alongside the video and soundtrack.
+    tags = tmp_path / "private.ffmeta"
+    tags.write_text(
+        ";FFMETADATA1\ninvokeai_graph=private_graph\ninvokeai_workflow=private_workflow\n"
+        "comment=private_prompt\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=1000\ntitle=private_chapter\n"
+    )
+    source = tmp_path / "gallery.mp4"
+    _ffmpeg(
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc2=s=320x256:r=24000/1001:d=2",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=d=2",
+        "-i",
+        str(tags),
+        "-map",
+        "0:v",
+        "-map",
+        "1:a",
+        "-map_metadata",
+        "2",
+        "-map_chapters",
+        "2",
+        "-metadata:s:v:0",
+        "handler_name=private_handler",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-c:a",
+        "aac",
+        "-movflags",
+        "+use_metadata_tags",
+        str(source),
+    )
+    return source
+
+
+@pytest.mark.ffmpeg
+@pytest.mark.parametrize("origin", [_GLOBAL, _CHINA])
+def test_sends_one_metadata_free_video_with_optional_images_in_one_submission(
+    http: MiniMaxHTTP, tagged_reference: Path, origin: str, tmp_path: Path
+) -> None:
+    image = Image.new("RGB", (256, 320))
+    with_images = origin == _CHINA
+    request = replace(
+        _REQUEST,
+        reference_video=lambda: tagged_reference,
+        reference_images=[image.copy] if with_images else (),
+        ratio="adaptive",
+    )
+    http.script = [_response(_CREATED), _response(_SUCCEEDED), _response(b"result")]
+    with _generate(request, origin) as path:
+        assert path.read_bytes() == b"result"
+    assert [(call.method, call.url) for call in http.calls] == [
+        ("POST", origin + "/v2/video_generation"),
+        ("GET", origin + "/v2/query/video_generation/123"),
+        ("GET", _CDN),
+    ]
+    payload = json.loads(http.calls[0].body)
+    assert payload["ratio"] == "adaptive"
+    assert [item.get("role") for item in payload["content"]] == (
+        [None, "reference_image", "reference_video"] if with_images else [None, "reference_video"]
+    )
+    video = payload["content"][-1]
+    assert video["type"] == "video_url"
+    prefix, encoded = video["video_url"]["url"].split(",")
+    assert prefix == "data:video/mp4;base64"
+    raw = base64.b64decode(encoded, validate=True)
+    for private_tag in [
+        b"private_prompt",
+        b"private_graph",
+        b"private_workflow",
+        b"private_chapter",
+        b"private_handler",
+    ]:
+        assert private_tag in tagged_reference.read_bytes() and private_tag not in raw
+    outgoing = tmp_path / "sent.mp4"
+    outgoing.write_bytes(raw)
+    assert read_mp4_tags(outgoing) == {}
+    original = _ffmpeg(
+        "-i", str(tagged_reference), "-map", "0:v:0", "-map", "0:a:0", "-c", "copy", "-f", "streamhash", "-"
+    )
+    sent = _ffmpeg("-i", str(outgoing), "-map", "0", "-c", "copy", "-f", "streamhash", "-")
+    assert sent == original
+    assert not list(tmp_path.glob("invokeai-minimax-reference-*"))
+
+
+@pytest.mark.ffmpeg
+@pytest.mark.parametrize("extra", ["audio", "video"])
+def test_rejects_multiple_playable_tracks_even_when_the_second_is_default(http, tmp_path, tagged_reference, extra):
+    source = tmp_path / "alternate-track.mp4"
+    selector, alternate = (
+        ("a", "sine=frequency=880:d=2") if extra == "audio" else ("v", "color=c=red:s=320x256:r=24:d=2")
+    )
+    _ffmpeg(
+        "-i",
+        str(tagged_reference),
+        "-f",
+        "lavfi",
+        "-i",
+        alternate,
+        "-map",
+        "0:V:0",
+        "-map",
+        "0:a:0",
+        "-map",
+        f"1:{selector}:0",
+        "-c",
+        "copy",
+        f"-c:{selector}:1",
+        "aac" if extra == "audio" else "libx264",
+        f"-disposition:{selector}:0",
+        "0",
+        f"-disposition:{selector}:1",
+        "default",
+        str(source),
+    )
+    with (
+        pytest.raises(ValueError, match="one video track and at most one audio track"),
+        _generate(replace(_REQUEST, reference_video=lambda: source)),
+    ):
+        pytest.fail("Submitted ambiguous tracks")
+    assert not http.calls and not list(tmp_path.glob("invokeai-minimax-reference-*"))
+
+
+@pytest.mark.ffmpeg
+def test_variable_rate_video_uses_its_own_average_frame_rate_with_a_longer_soundtrack(tmp_path):
+    source = tmp_path / "vfr.mp4"
+    # Alternating intervals on a 120 Hz clock average about 30 fps. The 5s audio tail would lower
+    # the estimate to 12 fps if the video sample count were divided by the whole movie duration.
+    _ffmpeg(
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc2=s=256x256:r=120:d=2",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=d=5",
+        "-vf",
+        "select='eq(mod(n,8),0)+eq(mod(n,8),3)'",
+        "-fps_mode",
+        "vfr",
+        "-c:v",
+        "libx264",
+        "-c:a",
+        "aac",
+        str(source),
+    )
+    request = replace(_REQUEST, reference_video=lambda: source)
+    assert json.loads(request.encode("global", lambda: False))["content"][1]["role"] == "reference_video"
+
+
+@pytest.mark.ffmpeg
+def test_combined_utf8_request_limit_accepts_exact_size_and_rejects_one_byte_more(
+    http: MiniMaxHTTP, tagged_reference: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    request = replace(
+        _REQUEST,
+        prompt='舞动 "🌊"\n',
+        reference_images=[Image.new("RGB", (256, 256)).copy],
+        reference_video=lambda: tagged_reference,
+    )
+    expected = request.encode("global", lambda: False)
+    monkeypatch.setattr(minimax, "_MAX_REQUEST_BYTES", len(expected))
+    assert request.encode("global", lambda: False) == expected
+    monkeypatch.setattr(minimax, "_MAX_REQUEST_BYTES", len(expected) - 1)
+    with pytest.raises(ValueError, match="64 MB"), _generate(request):
+        pytest.fail("Submitted oversized body")
+    assert not http.calls
+    assert not list(tmp_path.glob("invokeai-minimax-reference-*"))
+
+
+@pytest.mark.ffmpeg
+@pytest.mark.parametrize(
+    ("video", "audio", "size", "fps", "duration", "error"),
+    [
+        ("mpeg4", None, "256x256", "24", "2", "H.264 or HEVC"),
+        ("libx264", "ac3", "256x256", "24", "2", "AAC or MP3"),
+        (None, "aac", "", "", "2", "readable MP4 or MOV video"),
+        ("libx264", None, "254x256", "24", "2", "256–5760"),
+        ("libx264", None, "256x642", "24", "2", "aspect ratio"),
+        ("libx264", None, "256x256", "23975/1000", "2", "23.976–60 fps"),
+        ("libx264", None, "256x256", "61", "2", "23.976–60 fps"),
+        ("libx264", None, "256x256", "24", "1", "2–15 seconds"),
+        ("libx264", None, "256x256", "24", "15.1", "2–15 seconds"),
+        ("libx264", None, "256x256", "60", "2", None),
+        ("libx265", "libmp3lame", "256x256", "24", "2", None),
+    ],
+)
+def test_validates_actual_reference_streams_before_billing(http, tmp_path, video, audio, size, fps, duration, error):
+    source = tmp_path / "source.mp4"
+    args = []
+    if video:
+        args.extend(["-f", "lavfi", "-i", f"color=s={size}:r={fps}:d={duration}"])
+    if audio:
+        args.extend(["-f", "lavfi", "-i", f"sine=d={duration}"])
+    if video:
+        args.extend(["-c:v", video])
+    if audio:
+        args.extend(["-c:a", audio])
+    _ffmpeg(*args, str(source))
+    request = replace(_REQUEST, reference_video=lambda: source)
+    if error:
+        with pytest.raises(ValueError, match=error), _generate(request):
+            pytest.fail("Submitted invalid reference")
+    else:
+        assert json.loads(request.encode("cn", lambda: False))["content"][1]["role"] == "reference_video"
+    assert not http.calls
+    assert not list(tmp_path.glob("invokeai-minimax-reference-*"))
+
+
+@pytest.mark.ffmpeg
+def test_invalid_reference_file_and_cancellation_remove_the_prepared_copy(http, tmp_path, tagged_reference):
+    request = replace(_REQUEST, reference_video=lambda: tagged_reference)
+    # After a temporary remux exists, cancellation must prevent both validation/encoding and the paid POST.
+    with (
+        pytest.raises(CanceledException),
+        _generate(request, is_canceled=lambda: any(tmp_path.glob("invokeai-minimax-reference-*/reference.mp4"))),
+    ):
+        pytest.fail("Submitted canceled reference")
+    tagged_reference.write_bytes(b"not video")
+    with pytest.raises(ValueError, match="readable MP4"), _generate(request):
+        pytest.fail("Submitted invalid reference")
+    assert not http.calls
+    assert not list(tmp_path.glob("invokeai-minimax-reference-*"))
+
+
+def test_missing_and_oversized_gallery_files_fail_before_starting_ffmpeg(http, tmp_path, monkeypatch):
+    path = tmp_path / "missing-private-name.mp4"
+    request = replace(_REQUEST, reference_video=lambda: path)
+    monkeypatch.setattr(minimax, "run_ffmpeg_process", lambda *a, **kw: pytest.fail("Started a decoder"))
+    with pytest.raises(ValueError, match="could not be read") as failure, _generate(request):
+        pytest.fail("Submitted missing clip")
+    assert str(path) not in str(failure.value)
+    with path.open("wb") as stream:
+        stream.truncate(50_000_001)
+    with pytest.raises(ValueError, match="50 MB"), _generate(request):
+        pytest.fail("Submitted excessive source")
+    assert not http.calls

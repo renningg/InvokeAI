@@ -378,6 +378,13 @@ describe('clearDeletedVideoMedia', () => {
     expect(cleared.firstFrameImage).toBeNull();
     expect(cleared.lastFrameImage).toEqual(LAST_FRAME);
 
+    const withHostedVideo = {
+      ...withMedia,
+      hostedReferenceVideo: { video_name: 'whole.mp4', durationSeconds: 3, width: 512, height: 512 },
+    };
+    expect(clearDeletedVideoMedia(withHostedVideo, new Set(), new Set(['whole.mp4'])).hostedReferenceVideo).toBeNull();
+    expect(clearDeletedVideoMedia(withHostedVideo, new Set(), new Set(['other.mp4']))).toBe(withHostedVideo);
+
     const withClip = createSettings({ sourceVideo: SOURCE_VIDEO });
     const clipCleared = clearDeletedVideoMedia(withClip, new Set(), new Set(['clip.mp4']));
 

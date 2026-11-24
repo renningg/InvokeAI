@@ -204,6 +204,7 @@ import {
   getVideoDimensions,
   getVideoWidgetValidationReasons,
   normalizeVideoWidgetValues,
+  migrateLegacyHostedH3Images,
   resolveVideoSeed,
   syncVideoWidgetValuesWithModels,
   type VideoWidgetValues,
@@ -1686,7 +1687,13 @@ const settleWidgetValues = (
   typeId: WidgetTypeId,
   previous: Record<string, unknown>,
   values: Record<string, unknown>
-): Record<string, unknown> => (typeId === 'gallery' ? settleGalleryValues(previous, values) : values);
+): Record<string, unknown> => {
+  // Only hydration may adopt old shared images. Every new hosted session starts with an explicit selection.
+  if (typeId === 'video' && values.hostedH3 && values.hostedReferenceImages === undefined) {
+    return { ...values, hostedReferenceImages: [] };
+  }
+  return typeId === 'gallery' ? settleGalleryValues(previous, values) : values;
+};
 
 const updateProjectWidgetValues = (
   project: Project,
@@ -2282,6 +2289,13 @@ const assembleWorkbenchProject = (
   }
 
   for (const [instanceId, instance] of Object.entries(widgetInstances)) {
+    if (instance.typeId === 'video') {
+      const values = migrateLegacyHostedH3Images(instance.state.values);
+      if (values !== instance.state.values) {
+        widgetInstances[instanceId] = { ...instance, state: { ...instance.state, values } };
+      }
+      continue;
+    }
     if (instance.typeId !== 'gallery') {
       continue;
     }

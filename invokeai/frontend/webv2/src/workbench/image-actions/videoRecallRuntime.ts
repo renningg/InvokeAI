@@ -276,11 +276,14 @@ export const createVideoRecallRuntime = ({
       } else {
         commands.notifications.add({
           kind: 'info',
-          message: t(
-            placement.status === 'full'
-              ? 'widgets.video.placement.referenceFull'
-              : 'widgets.video.placement.referenceUnsupported'
-          ),
+          message:
+            placement.status === 'invalid'
+              ? placement.message
+              : t(
+                  placement.status === 'full'
+                    ? 'widgets.video.placement.referenceFull'
+                    : 'widgets.video.placement.referenceUnsupported'
+                ),
           title: t('widgets.video.placement.referenceNotAdded'),
         });
       }

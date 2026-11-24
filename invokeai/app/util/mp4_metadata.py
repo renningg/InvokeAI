@@ -24,6 +24,7 @@ import struct
 import subprocess
 import tempfile
 from collections.abc import Collection, Iterator, Mapping
+from fractions import Fraction
 from pathlib import Path
 from typing import BinaryIO, Callable, Optional
 
@@ -106,29 +107,67 @@ def read_mp4_movie_duration(path: Path) -> Optional[float]:
         if moov is None:
             return None
         mvhd = find_box(fh, *moov, b"mvhd", max_boxes=_MAX_MOVIE_HEADER_CHILDREN)
-        if mvhd is None or mvhd[0] >= mvhd[1]:
+        duration = _read_header_duration(fh, mvhd)
+        return float(duration) if duration is not None else None
+
+
+def _read_header_duration(fh: BinaryIO, box: Optional[tuple[int, int]]) -> Optional[Fraction]:
+    """Movie (mvhd) and media (mdhd) headers share the same versioned clock fields."""
+    if box is None or box[0] >= box[1]:
+        return None
+    fh.seek(box[0])
+    version = fh.read(1)
+    if version == b"\x00":
+        offset, size = 12, 4
+    elif version == b"\x01":
+        offset, size = 20, 8
+    else:
+        return None
+    if box[0] + offset + 4 + size > box[1]:
+        return None
+    fh.seek(box[0] + offset)
+    fields = fh.read(4 + size)
+    if len(fields) != 4 + size:
+        return None
+    timescale = int.from_bytes(fields[:4], "big")
+    duration = int.from_bytes(fields[4:], "big")
+    if timescale == 0 or duration == (1 << (size * 8)) - 1:
+        return None
+    return Fraction(duration, timescale)
+
+
+def read_mp4_video_frame_rate(path: Path) -> Optional[float]:
+    """Average fps of the first video track of a non-fragmented MP4, including variable-rate video."""
+    with path.open("rb") as fh:
+        fh.seek(0, 2)
+        moov = find_box(fh, 0, fh.tell(), b"moov", max_boxes=_MAX_TOP_LEVEL_BOXES)
+        if moov is None:
             return None
-        fh.seek(mvhd[0])
-        version = fh.read(1)
-        if not version or version[0] not in (0, 1):
-            return None
-        if version[0] == 0:
-            timescale_offset, duration_offset, duration_size = 12, 16, 4
-        else:
-            timescale_offset, duration_offset, duration_size = 20, 24, 8
-        if mvhd[0] + duration_offset + duration_size > mvhd[1]:
-            return None
-        fh.seek(mvhd[0] + timescale_offset)
-        timescale_raw = fh.read(4)
-        fh.seek(mvhd[0] + duration_offset)
-        duration_raw = fh.read(duration_size)
-        if len(timescale_raw) != 4 or len(duration_raw) != duration_size:
-            return None
-        timescale = struct.unpack(">I", timescale_raw)[0]
-        duration = int.from_bytes(duration_raw, "big")
-        if timescale == 0 or duration == (1 << (duration_size * 8)) - 1:
-            return None
-        return duration / timescale
+        for kind, start, end in iter_boxes(fh, *moov, max_boxes=_MAX_MOVIE_HEADER_CHILDREN):
+            if kind != b"trak":
+                continue
+            mdia = find_box(fh, start, end, b"mdia", max_boxes=_MAX_MOVIE_HEADER_CHILDREN)
+            if mdia is None:
+                continue
+            hdlr = find_box(fh, *mdia, b"hdlr", max_boxes=_MAX_MOVIE_HEADER_CHILDREN)
+            if hdlr is None or hdlr[0] + 12 > hdlr[1]:
+                continue
+            fh.seek(hdlr[0] + 8)
+            if fh.read(4) != b"vide":
+                continue
+            duration = _read_header_duration(fh, find_box(fh, *mdia, b"mdhd", max_boxes=_MAX_MOVIE_HEADER_CHILDREN))
+            # stsz carries the sample count at a fixed offset; no sample data or per-packet table is read.
+            box = mdia
+            for child in (b"minf", b"stbl", b"stsz"):
+                box = find_box(fh, *box, child, max_boxes=_MAX_MOVIE_HEADER_CHILDREN)
+                if box is None:
+                    return None
+            if not duration or box[0] + 12 > box[1]:
+                return None
+            fh.seek(box[0] + 8)
+            samples = int.from_bytes(fh.read(4), "big")
+            return float(samples / duration) if samples else None
+    return None
 
 
 def _meta_payload_start(fh: BinaryIO, start: int, end: int) -> int:

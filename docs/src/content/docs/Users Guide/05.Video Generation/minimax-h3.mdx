@@ -9,21 +9,29 @@ sidebar:
 
 import { Image } from 'astro:assets';
 import hostedGallery from '../assets/minimax-h3-api-gallery.png';
+import hostedReference from '../assets/minimax-h3-api-reference.png';
 
 ## Generate with the hosted API
 
 Use the Video tab to generate a clip on your MiniMax account without installing H3 weights.
 
-1. In **Model Manager → API Keys**, select the MiniMax region where your API key was issued, enter the key and save. On a shared installation, ask the administrator to configure the provider. The server sends the prompt and any selected input images to that region.
+1. In **Model Manager → API Keys**, select the MiniMax region where your API key was issued, enter the key and save. On a shared installation, ask the administrator to configure the provider. When you generate, Invoke sends the prompt and the selected media directly to that region.
 2. Open **Video**, select the MiniMax API option, then choose a model. Both regions offer H3, Highspeed, Lite and Max. The international service also offers Max-Turbo, MG and NC. The panel shows the resolutions and durations available for the selected model.
-3. Enter a prompt and choose a duration, resolution and soundtrack setting. For a first or last frame, select the image from your Gallery. For reference conditioning, choose up to nine Gallery images. Frame conditioning and reference conditioning are separate modes.
+3. Enter a prompt and choose a duration, resolution and soundtrack setting. For a first or last frame, select the image from your Gallery. To guide motion or timing, set **Input mode** to **Reference images and video** and select one full clip from the Gallery. You can add up to nine Gallery images alongside the clip or use images alone. Lite and NC require a fixed output aspect ratio in this mode.
+
+   <Image src={hostedReference} alt="Reference images and video mode with a 384 × 256 clip selected and an empty reference image slot below it." width={447} />
+
 4. Choose the destination board and generate. Invoke queues the request, waits for MiniMax to finish and saves the returned video in the Gallery. You can play it there after the provider's download URL expires.
 
 <Image src={hostedGallery} alt="The Video tab with MiniMax H3-Lite selected and a generated paper boat clip open from the project Inbox." />
 
+Use a reference clip 2–15 seconds long at 23.976–60 fps, with each side between 256 and 5760 pixels and a width-to-height ratio between 0.4 and 2.5. The clip must contain one video track (H.264 or HEVC) and at most one audio track (AAC or MP3). If your clip has multiple angles or soundtracks, export a copy with the tracks you want to send.
+
+Invoke sends the full video and audio tracks with any reference images in the same request. Your Gallery video does not need a public link. MiniMax limits each video to 50 MB and the complete encoded request to 64 MB. If the request is too large, use a shorter or smaller clip or remove reference images.
+
 While Invoke waits for MiniMax, the job occupies one generation slot on the Invoke server. On a server with a single slot, other jobs stay queued.
 
-Each submitted generation can incur a charge. Canceling in Invoke stops waiting for the result. A task already submitted to MiniMax may still finish and be billed. If the connection drops during submission, check your MiniMax task history before submitting again.
+MiniMax bills for the duration of the reference video as well as the generated video. Rates depend on the model and output resolution. See [international pricing](https://platform.minimax.io/docs/pricing/overview) or [mainland China pricing](https://platform.minimax.cn/docs/pricing/overview). Canceling in Invoke stops waiting for the result. A task already submitted to MiniMax may still finish and be billed. If the connection drops during submission, check your MiniMax task history before submitting again.
 
 See the [international API reference](https://platform.minimax.io/docs/api-reference/video-generation-v2-create) or the [mainland China API reference](https://platform.minimax.cn/docs/api-reference/video-generation-v2-create) for current model options.
 

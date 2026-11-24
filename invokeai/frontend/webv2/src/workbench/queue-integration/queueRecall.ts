@@ -4,7 +4,7 @@ import type { VideoWidgetValues } from '@features/video';
 import type { ImageRecallCapabilities, ImageRecallKind } from '@workbench/image-actions';
 
 import { extractGenerationMeta, extractNamedGenerationMeta, isWebv2QueueItemOrigin } from '@features/queue/contracts';
-import { cloneVideoWidgetValues } from '@features/video';
+import { cloneVideoWidgetValues, migrateLegacyHostedH3Images } from '@features/video';
 
 /** Partial recall merges current values; all/remix restores the submission snapshot. */
 
@@ -243,7 +243,12 @@ export const buildVideoQueueRecallPatch = (
     if (!snapshot) {
       return null;
     }
-    const values = cloneVideoWidgetValues(snapshot);
+    // Full recall patches the current panel. A legacy job used its shared images and had no hosted clip.
+    const values = {
+      hostedReferenceVideo: undefined,
+      hostedReferenceImages: undefined,
+      ...cloneVideoWidgetValues(migrateLegacyHostedH3Images(snapshot)),
+    };
     return kind === 'remix' ? { ...values, seedMode: 'random' } : values;
   }
   if (kind === 'prompts') {

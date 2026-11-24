@@ -17,6 +17,10 @@ import { galleryImages, galleryItems } from '@features/gallery';
 import { fetchGalleryVideoMetadata } from '@features/gallery/queries';
 import {
   createDefaultVideoWidgetValues,
+  createHostedH3ReferenceVideo,
+  getHostedH3ReferenceVideoIssue,
+  getHostedH3ReferenceImagePatch,
+  reconcileHostedH3Ratio,
   createVideoConditioningClip,
   createVideoReferenceEntry,
   createVideoSourceClip,
@@ -634,12 +638,16 @@ export const placeInitialVideo = ({
 
 export type ReferenceVideoPlacement =
   | { patch: Partial<VideoWidgetValues>; status: 'appended' }
+  | { status: 'invalid'; message: string }
   | { status: 'full' | 'unsupported' };
 
 const getReferenceVideoRoom = (
   values: VideoWidgetValues,
   policy = !values.hostedH3 && values.model ? getVideoModelPolicy(values.model, values) : null
 ): 'available' | 'full' | 'unsupported' => {
+  if (values.hostedH3) {
+    return values.hostedReferenceVideo ? 'full' : 'available';
+  }
   if (!policy?.references || !policy.modes.includes('reference')) {
     return 'unsupported';
   }
@@ -664,6 +672,21 @@ export const appendReferenceVideo = ({
 
   if (room !== 'available') {
     return { status: room };
+  }
+
+  if (values.hostedH3) {
+    const reference = createHostedH3ReferenceVideo(video);
+    const issue = getHostedH3ReferenceVideoIssue(reference, video.mediaOrigin);
+    return issue
+      ? { status: 'invalid', message: issue }
+      : {
+          status: 'appended',
+          patch: {
+            hostedH3: reconcileHostedH3Ratio({ ...values.hostedH3, input: 'references' }),
+            hostedReferenceVideo: reference,
+            hostedReferenceImages: values.hostedReferenceImages ?? [],
+          },
+        };
   }
 
   const referenceExtend = Boolean(values.model && getVideoModelPolicy(values.model, values).references?.extend);
@@ -701,19 +724,8 @@ export const placeVideoImage = ({
   const values = getCurrentVideoValues({ models, videoValues });
   if (values.hostedH3) {
     if (values.hostedH3.input === 'references') {
-      const kept = append ? values.references : [];
-      if (kept.length >= 9) {
-        return { status: 'full' };
-      }
-      return {
-        displaced: Boolean(values.sourceVideo || values.conditioningClip),
-        patch: getReferencesPatch({
-          referenceExtend: false,
-          references: [...kept, { detail: DEFAULT_REFERENCE_IMAGE_DETAIL, image, kind: 'image' }],
-        }),
-        slot: 'reference',
-        status: 'placed',
-      };
+      const patch = getHostedH3ReferenceImagePatch(values, image, append);
+      return patch ? { status: 'placed', slot: 'reference', patch, displaced: false } : { status: 'full' };
     }
     if (append && values.firstFrameImage && values.lastFrameImage) {
       return { status: 'full' };

@@ -6,6 +6,7 @@ import type { WorkbenchInternalStore } from '@workbench/workbenchStore';
 import type { ComponentProps } from 'react';
 
 import { ChakraProvider } from '@chakra-ui/react';
+import { DndContext } from '@dnd-kit/core';
 import { GalleryHostProvider, type GalleryHost } from '@features/gallery/picker';
 import { GenerationUiProvider, type GenerationUiAdapter } from '@features/generation/ui/GenerationUiContext';
 import { seedArchitectureCapabilities } from '@features/models/core/architectureCapabilities.testing';
@@ -140,6 +141,30 @@ vi.mock('@features/models/react', async (importOriginal) => ({
     );
   },
 }));
+vi.mock('@features/gallery/data/backend', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  listGalleryBoards: () => Promise.resolve([{ id: 'none', kind: 'uncategorized', name: '', videoCount: 2 }]),
+  listGalleryDateBoards: () => Promise.resolve([]),
+  listGalleryItems: () =>
+    Promise.resolve({
+      total: 3,
+      items: ['coast.mp4', 'river.mp4', 'sky.png'].map((name) => ({
+        boardId: 'none',
+        category: 'general',
+        createdAt: '2026-01-01T00:00:00Z',
+        durationSeconds: 4,
+        fps: 24,
+        fullUrl: '/clip',
+        height: 720,
+        isIntermediate: false,
+        kind: name.endsWith('.mp4') ? 'video' : 'image',
+        name,
+        starred: false,
+        thumbnailUrl: '/thumb',
+        width: 1280,
+      })),
+    }),
+}));
 vi.mock('@features/gallery/mediaSlot', async (importOriginal) => {
   const original = await importOriginal<typeof GallerySlots>();
   // oxlint-disable-next-line react-perf/jsx-no-new-object-as-prop -- this host is created once by the module mock.
@@ -244,7 +269,9 @@ const render = async () => {
           <ChakraProvider value={system}>
             <GenerationUiProvider adapter={generationAdapter}>
               <VideoUiAdapterProvider>
-                <VideoWidgetView />
+                <DndContext>
+                  <VideoWidgetView />
+                </DndContext>
               </VideoUiAdapterProvider>
             </GenerationUiProvider>
           </ChakraProvider>
@@ -311,6 +338,73 @@ describe('video model switch confirmation', () => {
     expect(stored().hostedH3).toBeUndefined();
   });
 
+  it('chooses, replaces and removes a whole Gallery clip from the keyboard while keeping the local source', async () => {
+    await render();
+    const change = (label: string, value: string) =>
+      act(() => userEvent.selectOptions(page.getByRole('combobox', { name: label, exact: true }), value));
+    await change('Generation service', 'minimax');
+    await change('Input mode', 'references');
+    const open = async (label: RegExp) => {
+      const trigger = page.getByRole('button', { name: label });
+      await expect.element(trigger).toBeVisible();
+      (trigger.element() as HTMLButtonElement).focus();
+      await act(() => userEvent.keyboard('{Enter}'));
+      await expect.element(page.getByRole('option', { name: /coast.mp4/ })).toBeVisible();
+      expect(document.querySelector('[role="dialog"] input[type="file"]')).toBeNull();
+    };
+    await open(/Choose Reference video/);
+    await act(() => userEvent.keyboard('{Enter}'));
+    await expect.element(page.getByRole('button', { name: 'Replace Reference video (coast.mp4)' })).toHaveFocus();
+    expect(stored().hostedReferenceVideo).toEqual({
+      video_name: 'coast.mp4',
+      width: 1280,
+      height: 720,
+      fps: 24,
+      durationSeconds: 4,
+    });
+    await act(() => userEvent.click(page.getByRole('button', { name: /Choose Reference image 1/ })));
+    await act(() => userEvent.click(page.getByRole('option', { name: 'sky.png' })));
+    expect(stored().hostedReferenceImages).toEqual([{ image_name: 'sky.png', width: 1280, height: 720 }]);
+    await change('Generation service', 'local');
+    expect(stored()).toMatchObject({ sourceVideo: SOURCE_VIDEO, lastFrameImage: LAST_FRAME, references: [] });
+    await change('Generation service', 'minimax');
+    await change('Input mode', 'references');
+    await open(/Replace Reference video/);
+    await act(() => userEvent.keyboard('{ArrowRight}{Enter}'));
+    await expect.element(page.getByRole('button', { name: 'Replace Reference video (river.mp4)' })).toHaveFocus();
+    const remove = page.getByRole('button', { name: 'Remove Reference video' });
+    (remove.element() as HTMLButtonElement).focus();
+    await act(() => userEvent.keyboard('{Enter}'));
+    await expect.element(page.getByRole('button', { name: /Choose Reference video/ })).toHaveFocus();
+    expect(stored().hostedReferenceVideo).toBeNull();
+    expect(stored().sourceVideo).toEqual(SOURCE_VIDEO);
+  });
+
+  it('starts MiniMax without the images selected for a local reference model', async () => {
+    await render();
+    const main = model('local-ref', 'minimax-h3', 'main', 'Local H3 Ref2VA', {
+      format: 'checkpoint',
+      variant: 'ref2va',
+    });
+    const privateImage = { image_name: 'private.png', width: 512, height: 512 };
+    await act(() => {
+      modelStore.set([...catalog, main]);
+      store.commands.widgets.patchValues('video', {
+        model: main,
+        modelKey: main.key,
+        sourceVideo: null,
+        firstFrameImage: null,
+        lastFrameImage: null,
+        references: [{ kind: 'image', detail: 'match', image: privateImage }],
+      });
+    });
+    await act(() => userEvent.selectOptions(page.getByRole('combobox', { name: 'Generation service' }), 'minimax'));
+    await act(() => userEvent.selectOptions(page.getByRole('combobox', { name: 'Input mode' }), 'references'));
+    await expect.element(page.getByRole('button', { name: /Choose Reference image 1/ })).toBeVisible();
+    expect(stored().references).toMatchObject([{ image: privateImage }]);
+    expect(stored().hostedReferenceImages).toEqual([]);
+  });
+
   it('names hosted image choosers by position and keeps focus at a reference slot across replacement and removal', async () => {
     await render();
     const change = (label: string, value: string) =>
@@ -320,14 +414,13 @@ describe('video model switch confirmation', () => {
     await expect.element(page.getByRole('button', { name: /Choose First Frame/ })).toBeVisible();
     await expect.element(page.getByRole('button', { name: 'Replace Last Frame (dusk.png)' })).toBeVisible();
     await change('Input mode', 'references');
-    const refs = (names: string[]) =>
-      names.map((image_name) => ({ kind: 'image', detail: 'match', image: { image_name, width: 1024, height: 768 } }));
-    await act(() => store.commands.widgets.patchValues('video', { references: refs(['a.png', 'b.png']) }));
+    const images = (names: string[]) => names.map((image_name) => ({ image_name, width: 1024, height: 768 }));
+    await act(() => store.commands.widgets.patchValues('video', { hostedReferenceImages: images(['a.png', 'b.png']) }));
     const first = page
       .getByRole('button', { name: 'Replace Reference image 1 (a.png)' })
       .element() as HTMLButtonElement;
     first.focus();
-    await act(() => store.commands.widgets.patchValues('video', { references: refs(['c.png', 'b.png']) }));
+    await act(() => store.commands.widgets.patchValues('video', { hostedReferenceImages: images(['c.png', 'b.png']) }));
     await expect.element(page.getByRole('button', { name: 'Replace Reference image 1 (c.png)' })).toHaveFocus();
     await act(() => userEvent.click(page.getByRole('button', { name: 'Remove Reference image 1' })));
     await expect.element(page.getByRole('button', { name: 'Replace Reference image 1 (b.png)' })).toHaveFocus();
@@ -583,7 +676,9 @@ describe('video model field without a model', () => {
             <ChakraProvider value={system}>
               <GenerationUiProvider adapter={generationAdapter}>
                 <VideoUiAdapterProvider>
-                  <VideoWidgetView />
+                  <DndContext>
+                    <VideoWidgetView />
+                  </DndContext>
                 </VideoUiAdapterProvider>
               </GenerationUiProvider>
             </ChakraProvider>
@@ -617,7 +712,9 @@ describe('the dynamic prompts decision on first mount', () => {
             <ChakraProvider value={system}>
               <GenerationUiProvider adapter={generationAdapter}>
                 <VideoUiAdapterProvider>
-                  <VideoWidgetView />
+                  <DndContext>
+                    <VideoWidgetView />
+                  </DndContext>
                 </VideoUiAdapterProvider>
               </GenerationUiProvider>
             </ChakraProvider>

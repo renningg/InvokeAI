@@ -12,6 +12,7 @@ from invokeai.app.invocations.fields import (
     InputField,
     MetadataField,
     UIComponent,
+    VideoField,
     WithBoard,
     WithMetadata,
 )
@@ -28,8 +29,8 @@ from invokeai.app.services.external_generation.minimax_video import (
     MiniMaxResolution,
     MiniMaxVideoRequest,
     generate_minimax_video,
-    minimax_video_region,
-    validate_minimax_image_size,
+    require_minimax_video_region,
+    validate_minimax_media_dimensions,
 )
 from invokeai.app.services.session_processor.session_processor_common import CanceledException
 from invokeai.app.services.shared.invocation_context import InvocationContext
@@ -43,7 +44,7 @@ from invokeai.app.util.video_thumbnails import decoder_frame_count, probe_decoda
     title="MiniMax H3 Hosted Video",
     tags=["minimax", "h3", "external", "video"],
     category="video",
-    version="1.0.0",
+    version="1.1.0",
     bottleneck=Bottleneck.Network,
     use_cache=False,
 )
@@ -68,6 +69,9 @@ class MiniMaxH3VideoGenerationInvocation(BaseInvocation, WithMetadata, WithBoard
     reference_images: list[ImageField] = InputField(
         default=[], max_length=9, description="Ordered reference images, used in place of first and last frames"
     )
+    reference_video: VideoField | None = InputField(
+        default=None, description="Gallery reference video, optionally combined with reference images"
+    )
 
     def invoke(self, context: InvocationContext) -> VideoOutput:
         api_key, base_url = context.config.get().minimax_credentials()
@@ -75,7 +79,8 @@ class MiniMaxH3VideoGenerationInvocation(BaseInvocation, WithMetadata, WithBoard
             raise ExternalProviderNotConfiguredError(
                 "Configure a MiniMax API key in Model Manager to generate hosted video."
             )
-        if self.expected_region is not None and minimax_video_region(base_url) != self.expected_region:
+        region = require_minimax_video_region(base_url)
+        if self.expected_region is not None and region != self.expected_region:
             raise ExternalProviderNotConfiguredError(
                 "The MiniMax region changed after this job was queued. Review the region and queue the job again."
             )
@@ -86,11 +91,16 @@ class MiniMaxH3VideoGenerationInvocation(BaseInvocation, WithMetadata, WithBoard
 
         check_canceled()
         context.videos.get_authorized_output_board()
-        # Authorize and bound every input before decoding the pixels of even the first reference.
+        # Authorize every input before reading any Gallery media bytes.
+        if (
+            self.reference_video
+            and context.videos.get_dto(self.reference_video.video_name).media_origin == "audio_upload"
+        ):
+            raise ValueError("Select a Gallery video for the MiniMax reference. This item is an audio upload.")
         for field in (self.first_frame, self.last_frame, *self.reference_images):
             if field is not None:
                 dto = context.images.get_dto(field.image_name)
-                validate_minimax_image_size(dto.width, dto.height)
+                validate_minimax_media_dimensions(dto.width, dto.height)
         request = MiniMaxVideoRequest(
             model=self.model,
             prompt=self.prompt,
@@ -101,6 +111,9 @@ class MiniMaxH3VideoGenerationInvocation(BaseInvocation, WithMetadata, WithBoard
             first_frame=partial(context.images.get_pil, self.first_frame.image_name) if self.first_frame else None,
             last_frame=partial(context.images.get_pil, self.last_frame.image_name) if self.last_frame else None,
             reference_images=[partial(context.images.get_pil, image.image_name) for image in self.reference_images],
+            reference_video=partial(context.videos.get_path, self.reference_video.video_name)
+            if self.reference_video
+            else None,
         )
         context.util.signal_progress("Submitting video to MiniMax")
         with (

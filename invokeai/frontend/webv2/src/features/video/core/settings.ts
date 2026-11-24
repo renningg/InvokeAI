@@ -19,6 +19,7 @@ import {
 import { isSeedMode } from '@platform/core/seed';
 
 import type {
+  HostedH3ReferenceVideo,
   HostedH3Settings,
   Ltx2TargetResolution,
   MiniMaxH3TargetResolution,
@@ -110,6 +111,16 @@ export const isImageWithDims = (value: unknown): value is ImageWithDims =>
   hasFiniteNumber(value, 'width') &&
   hasFiniteNumber(value, 'height');
 
+/** Hosted image edits leave the local conditioning setup intact, including for older projects. */
+export const getHostedH3ReferenceImagePatch = (
+  values: VideoWidgetValues,
+  image: ImageWithDims,
+  append: boolean
+): Partial<VideoWidgetValues> | null => {
+  const images = append ? (values.hostedReferenceImages ?? []) : [];
+  return images.length < VIDEO_REFERENCE_MAX_IMAGES ? { hostedReferenceImages: [...images, image] } : null;
+};
+
 export const isVideoClipRef = (value: unknown): value is VideoClipRef =>
   isRecord(value) &&
   typeof value.video_name === 'string' &&
@@ -117,6 +128,28 @@ export const isVideoClipRef = (value: unknown): value is VideoClipRef =>
   hasFiniteNumber(value, 'height') &&
   hasFiniteNumber(value, 'numFrames') &&
   hasFiniteNumber(value, 'fps');
+
+const isHostedH3ReferenceVideo = (value: unknown): value is HostedH3ReferenceVideo =>
+  isRecord(value) &&
+  typeof value.video_name === 'string' &&
+  hasFiniteNumber(value, 'width') &&
+  hasFiniteNumber(value, 'height') &&
+  hasFiniteNumber(value, 'durationSeconds') &&
+  (value.fps === undefined || hasFiniteNumber(value, 'fps'));
+
+export const createHostedH3ReferenceVideo = (item: {
+  name: string;
+  width: number;
+  height: number;
+  durationSeconds: number;
+  fps?: number;
+}): HostedH3ReferenceVideo => ({
+  video_name: item.name,
+  width: item.width,
+  height: item.height,
+  durationSeconds: item.durationSeconds,
+  ...(item.fps === undefined ? {} : { fps: item.fps }),
+});
 
 export const isVideoSourceClip = (value: unknown): value is VideoSourceClip =>
   isRecord(value) &&
@@ -196,6 +229,24 @@ export const isVideoReferenceItem = (value: unknown): value is VideoReferenceIte
     );
   }
   return false;
+};
+
+/** Only a saved hosted References panel with exclusively images could previously send its shared list. */
+export const migrateLegacyHostedH3Images = <T extends object>(values: T): T => {
+  const raw = values as Record<string, unknown>;
+  if (!isRecord(raw.hostedH3) || raw.hostedReferenceImages !== undefined) {
+    return values;
+  }
+  const references = raw.references;
+  const images =
+    raw.hostedH3.input === 'references' &&
+    raw.hostedReferenceVideo === undefined &&
+    Array.isArray(references) &&
+    references.length <= VIDEO_REFERENCE_MAX_IMAGES &&
+    references.every((entry) => isVideoReferenceItem(entry) && entry.kind === 'image')
+      ? references.map((entry) => ({ ...entry.image }))
+      : [];
+  return { ...values, hostedReferenceImages: images };
 };
 
 /** Keeps order, the anchor and the oldest video references; drops the newest non-anchor overflow. */
@@ -523,6 +574,12 @@ export const normalizeVideoWidgetValues = (values: unknown): VideoWidgetValues |
   return {
     ...settings,
     ...(hostedH3 ? { hostedH3 } : {}),
+    ...(values.hostedReferenceVideo === null || isHostedH3ReferenceVideo(values.hostedReferenceVideo)
+      ? { hostedReferenceVideo: values.hostedReferenceVideo }
+      : {}),
+    ...(Array.isArray(values.hostedReferenceImages)
+      ? { hostedReferenceImages: values.hostedReferenceImages.filter(isImageWithDims) }
+      : {}),
     model: isMainModelConfig(values.model) ? values.model : null,
   };
 };
@@ -532,14 +589,25 @@ export const isVideoWidgetValues = (values: unknown): values is VideoWidgetValue
     return false;
   }
 
-  const model = (values as unknown as Record<string, unknown>).model;
+  const { model, hostedReferenceVideo, hostedReferenceImages } = values as unknown as Record<string, unknown>;
 
-  return model === null || isMainModelConfig(model);
+  return (
+    (model === null || isMainModelConfig(model)) &&
+    (hostedReferenceImages === undefined ||
+      (Array.isArray(hostedReferenceImages) && hostedReferenceImages.every(isImageWithDims))) &&
+    (hostedReferenceVideo === undefined ||
+      hostedReferenceVideo === null ||
+      isHostedH3ReferenceVideo(hostedReferenceVideo))
+  );
 };
 
 export const cloneVideoWidgetValues = (values: VideoWidgetValues): VideoWidgetValues & Record<string, unknown> => ({
   ...values,
   hostedH3: values.hostedH3 ? { ...values.hostedH3 } : undefined,
+  ...(values.hostedReferenceVideo ? { hostedReferenceVideo: { ...values.hostedReferenceVideo } } : {}),
+  ...(values.hostedReferenceImages
+    ? { hostedReferenceImages: values.hostedReferenceImages.map((image) => ({ ...image })) }
+    : {}),
   acceleratorLoraKeys: [...values.acceleratorLoraKeys],
   componentSourceModel: values.componentSourceModel ? { ...values.componentSourceModel } : null,
   firstFrameImage: values.firstFrameImage ? { ...values.firstFrameImage } : null,
@@ -1004,11 +1072,21 @@ export const clearDeletedVideoMedia = <T extends object>(
     firstFrameImage?: unknown;
     lastFrameImage?: unknown;
     sourceVideo?: unknown;
+    hostedReferenceVideo?: unknown;
+    hostedReferenceImages?: unknown;
     references?: unknown;
   };
   const clearFirst = isImageWithDims(slots.firstFrameImage) && removedImageNames.has(slots.firstFrameImage.image_name);
   const clearLast = isImageWithDims(slots.lastFrameImage) && removedImageNames.has(slots.lastFrameImage.image_name);
   const clearSource = isVideoSourceClip(slots.sourceVideo) && removedVideoNames.has(slots.sourceVideo.video_name);
+  const clearHosted =
+    isHostedH3ReferenceVideo(slots.hostedReferenceVideo) &&
+    removedVideoNames.has(slots.hostedReferenceVideo.video_name);
+  const hostedImages = Array.isArray(slots.hostedReferenceImages) ? slots.hostedReferenceImages : null;
+  const keptHostedImages = hostedImages?.filter(
+    (image) => !isImageWithDims(image) || !removedImageNames.has(image.image_name)
+  );
+  const clearHostedImages = keptHostedImages !== undefined && keptHostedImages.length !== hostedImages?.length;
   const clearConditioning =
     isVideoConditioningClip(slots.conditioningClip) && removedVideoNames.has(slots.conditioningClip.clip.video_name);
   const references = Array.isArray(slots.references) ? slots.references : null;
@@ -1021,7 +1099,15 @@ export const clearDeletedVideoMedia = <T extends object>(
   );
   const clearReferences = keptReferences !== undefined && keptReferences.length !== references?.length;
 
-  if (!clearFirst && !clearLast && !clearSource && !clearConditioning && !clearReferences) {
+  if (
+    !clearFirst &&
+    !clearLast &&
+    !clearSource &&
+    !clearHosted &&
+    !clearHostedImages &&
+    !clearConditioning &&
+    !clearReferences
+  ) {
     return values;
   }
 
@@ -1030,6 +1116,8 @@ export const clearDeletedVideoMedia = <T extends object>(
     ...values,
     ...(clearFirst ? { firstFrameImage: null } : {}),
     ...(clearLast ? { lastFrameImage: null } : {}),
+    ...(clearHosted ? { hostedReferenceVideo: null } : {}),
+    ...(clearHostedImages ? { hostedReferenceImages: keptHostedImages } : {}),
     ...(clearSource ? { sourceVideo: null } : {}),
     ...(clearConditioning ? { conditioningClip: null } : {}),
     ...(clearReferences ? { references: keptReferences } : {}),

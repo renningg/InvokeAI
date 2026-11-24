@@ -205,6 +205,49 @@ describe('gallery optimistic rollback against the real reducer', () => {
     expect(getProjectWidgetValues(getProject(restored, projectId), 'gallery').selectedImage).toEqual(galleryItem);
   });
 
+  it('restores independent hosted and local uses of the same deleted media unless a replacement claimed the slot', () => {
+    const { state, projectId } = seedProjectWithItem();
+    const clip = { video_name: 'clip.mp4', width: 832, height: 480, fps: 24 };
+    const conditioningClip = { clip: { ...clip, numFrames: 120 }, role: 'audio', fpsKnown: true };
+    const hostedReferenceVideo = { ...clip, durationSeconds: 5 };
+    const hostedReferenceImages = [upscaleInputImage];
+    const patch = (target: WorkbenchState, values: Record<string, unknown>) =>
+      workbenchReducer(target, { type: 'patchWidgetValues', projectId, widgetId: 'video', values });
+    const seeded = patch(state, { conditioningClip, hostedReferenceVideo, hostedReferenceImages });
+    const before = captureGalleryWidgetKeyValues(seeded.projects);
+    const removed = workbenchReducer(seeded, {
+      type: 'removeGalleryItems',
+      itemKeys: ['video:clip.mp4', 'image:a.png'],
+    });
+    const entries = diffGalleryWidgetKeyValues(before, removed.projects);
+    const restore = (target: WorkbenchState) =>
+      getProjectWidgetValues(
+        getProject(
+          applyRestorePatches(target, selectRestorableGalleryWidgetPatches(entries, target.projects)),
+          projectId
+        ),
+        'video'
+      );
+    expect(getProjectWidgetValues(getProject(removed, projectId), 'video')).toMatchObject({
+      conditioningClip: null,
+      hostedReferenceVideo: null,
+      hostedReferenceImages: [],
+    });
+    expect(restore(removed)).toMatchObject({ conditioningClip, hostedReferenceVideo, hostedReferenceImages });
+    const replacement = { ...hostedReferenceVideo, video_name: 'replacement.mp4' };
+    expect(restore(patch(removed, { hostedReferenceVideo: replacement }))).toMatchObject({
+      conditioningClip,
+      hostedReferenceVideo: replacement,
+      hostedReferenceImages,
+    });
+    const sourceVideo = { ...clip, video_name: 'new-source.mp4', numFrames: 120, startFrame: 2, endFrame: 89 };
+    expect(restore(patch(removed, { sourceVideo }))).toMatchObject({
+      conditioningClip: null,
+      sourceVideo,
+      hostedReferenceVideo,
+    });
+  });
+
   it('restores swept references even when an initial video occupies the panel (reference-extend pair)', () => {
     // Ref2VA sourceVideo and references may coexist; rollback must restore both after failed deletion.
     const seeded = seedProjectWithItem();

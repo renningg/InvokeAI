@@ -2,7 +2,7 @@ import type { GenerateWidgetValues } from '@features/generation/contracts';
 import type { QueueItemReadModel } from '@features/queue/contracts';
 
 import { buildQueueItemOrigin } from '@features/queue/contracts';
-import { createDefaultVideoWidgetValues } from '@features/video';
+import { compileHostedH3Graph, createDefaultVideoWidgetValues } from '@features/video';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -229,6 +229,40 @@ describe('buildVideoQueueRecallPatch', () => {
       seed: 456,
       seedMode: 'fixed',
     });
+  });
+
+  it('recalls a legacy image-only job over a hosted video and image override', () => {
+    const snapshot = {
+      ...createDefaultVideoWidgetValues(),
+      hostedH3: {
+        model: 'MiniMax-H3',
+        input: 'references' as const,
+        duration: 5,
+        resolution: '768P',
+        generateAudio: true,
+        ratio: '16:9',
+      },
+      references: [
+        {
+          kind: 'image' as const,
+          detail: 'match' as const,
+          image: { image_name: 'legacy.png', width: 768, height: 768 },
+        },
+      ],
+    };
+    for (const kind of ['all', 'remix'] as const) {
+      const recalled = {
+        ...snapshot,
+        hostedReferenceVideo: { video_name: 'private.mp4', width: 768, height: 768, durationSeconds: 3 },
+        hostedReferenceImages: [{ image_name: 'private.png', width: 768, height: 768 }],
+        ...buildVideoQueueRecallPatch(kind, {}, snapshot),
+      };
+      expect(recalled.hostedReferenceImages).toEqual([snapshot.references[0]!.image]);
+      const output = compileHostedH3Graph({ ...recalled, references: [] }, snapshot.hostedH3, 'global', null)
+        .backendGraph!.nodes.video_output;
+      expect(output.reference_images).toEqual([{ image_name: 'legacy.png' }]);
+      expect(output).not.toHaveProperty('reference_video');
+    }
   });
 
   it('patches only the prompt keys, so the rest of the Video panel is untouched', () => {

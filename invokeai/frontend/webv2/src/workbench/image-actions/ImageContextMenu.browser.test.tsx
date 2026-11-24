@@ -146,6 +146,7 @@ const createActions = (deleteItems: ImageActions['deleteItems']): ImageActions =
   sendToInitialVideo: vi.fn(),
   useAsReferenceImage: vi.fn(),
   useAsConditioningClip: vi.fn(),
+  sendImageToVideo: vi.fn(),
   useAsReferenceVideo: vi.fn(),
 });
 

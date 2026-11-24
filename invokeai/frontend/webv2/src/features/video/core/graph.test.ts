@@ -43,19 +43,51 @@ const settingsFor = (model: MainModelConfig, overrides: Partial<VideoSettings> =
   ...overrides,
 });
 
-it('only sends hosted input images from the chosen mode, preserving the reference order', () => {
+it('only sends explicitly selected hosted references in reference mode, preserving image order', () => {
   const refs = ['second.png', 'first.png'].map((image_name) => ({
     kind: 'image' as const,
     detail: 'match' as const,
     image: { image_name, width: 1024, height: 768 },
   }));
-  const values = { ...createDefaultVideoWidgetValues(), references: refs, firstFrameImage: FIRST_FRAME };
+  const values = {
+    ...createDefaultVideoWidgetValues(),
+    hostedReferenceVideo: { video_name: 'whole.mp4', width: 1024, height: 768, fps: 24, durationSeconds: 4 },
+    hostedReferenceImages: refs.map((entry) => entry.image),
+    references: [
+      {
+        kind: 'image' as const,
+        detail: 'match' as const,
+        image: { image_name: 'local-private.png', width: 1024, height: 768 },
+      },
+      { kind: 'video' as const, clip: SOURCE_VIDEO, conditioning: 'audio' as const },
+    ],
+    firstFrameImage: FIRST_FRAME,
+  };
   const output = (input: 'text' | 'frames' | 'references') =>
     compileHostedH3Graph(values, { ...DEFAULT_HOSTED_H3, input }, 'cn', null).backendGraph!.nodes.video_output;
   expect(output('text')).not.toHaveProperty('first_frame');
   expect(output('text')).not.toHaveProperty('reference_images');
+  expect(output('text')).not.toHaveProperty('reference_video');
+  expect(output('frames')).not.toHaveProperty('reference_video');
   expect(output('frames')).not.toHaveProperty('reference_images');
   expect(output('references')).not.toHaveProperty('first_frame');
+  expect(
+    compileHostedH3Graph(
+      { ...values, hostedReferenceImages: undefined },
+      { ...DEFAULT_HOSTED_H3, input: 'references' },
+      'global',
+      null
+    ).backendGraph!.nodes.video_output.reference_images
+  ).toEqual([]);
+  expect(output('references').reference_video).toEqual({ video_name: 'whole.mp4' });
+  expect(
+    compileHostedH3Graph(
+      { ...values, hostedReferenceVideo: null },
+      { ...DEFAULT_HOSTED_H3, input: 'references' },
+      'global',
+      null
+    ).backendGraph!.nodes.video_output
+  ).not.toHaveProperty('reference_video');
   expect(output('references').reference_images).toEqual([{ image_name: 'second.png' }, { image_name: 'first.png' }]);
 });
 

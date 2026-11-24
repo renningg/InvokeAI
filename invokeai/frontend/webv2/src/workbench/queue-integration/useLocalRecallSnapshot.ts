@@ -4,7 +4,7 @@ import type { Project } from '@workbench/projectContracts';
 
 import { normalizeGenerateWidgetValues } from '@features/generation/settings';
 import { parseQueueItemOrigin, parseQueueItemOriginProjectId } from '@features/queue/contracts';
-import { normalizeVideoWidgetValues, type VideoWidgetValues } from '@features/video';
+import { migrateLegacyHostedH3Images, normalizeVideoWidgetValues, type VideoWidgetValues } from '@features/video';
 import { assertAccountScopeCurrent, captureAccountScope, type AccountScope } from '@platform/state/accountLifecycle';
 import { type QueryClient, useQuery } from '@tanstack/react-query';
 import { isRecord } from '@workbench/canvasMigration';
@@ -65,7 +65,9 @@ const durableRecallSnapshotOptions = (owner: AccountScope, projectId: string | n
         generateValues: snapshot.generateValues
           ? (normalizeGenerateWidgetValues(snapshot.generateValues) ?? undefined)
           : undefined,
-        videoValues: snapshot.videoValues ? (normalizeVideoWidgetValues(snapshot.videoValues) ?? undefined) : undefined,
+        videoValues: isRecord(snapshot.videoValues)
+          ? (normalizeVideoWidgetValues(migrateLegacyHostedH3Images(snapshot.videoValues)) ?? undefined)
+          : undefined,
       };
     } finally {
       cache.close();

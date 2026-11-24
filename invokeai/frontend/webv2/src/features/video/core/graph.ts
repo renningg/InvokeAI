@@ -1060,9 +1060,10 @@ export const compileHostedH3Graph = (
       : {}),
     ...(hosted.input === 'references'
       ? {
-          reference_images: settings.references.flatMap((entry) =>
-            entry.kind === 'image' ? [toImageField(entry.image)] : []
-          ),
+          ...(settings.hostedReferenceVideo
+            ? { reference_video: { video_name: settings.hostedReferenceVideo.video_name } }
+            : {}),
+          reference_images: (settings.hostedReferenceImages ?? []).map(toImageField),
         }
       : {}),
   });

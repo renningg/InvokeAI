@@ -42355,6 +42355,11 @@ export type components = {
              */
             reference_images?: components["schemas"]["ImageField"][];
             /**
+             * @description Gallery reference video, optionally combined with reference images
+             * @default null
+             */
+            reference_video?: components["schemas"]["VideoField"] | null;
+            /**
              * type
              * @default minimax_h3_video_generation
              * @constant

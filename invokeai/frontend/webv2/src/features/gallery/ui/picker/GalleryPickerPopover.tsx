@@ -27,6 +27,8 @@ const SINGLE_SELECTION: GalleryPickerSelection = { mode: 'single' };
 
 export interface GalleryPickerPopoverProps {
   accept: GalleryPickerAccept;
+  /** Select existing Gallery items without offering file uploads. */
+  galleryOnly?: boolean;
   /** The trigger element; must accept a ref and a click handler. It takes `data-hover` while the picker is open. */
   children: ReactElement;
   /** Shared with a Tooltip wrapping an icon-only trigger (see `useTooltipTriggerIds`). */
@@ -49,6 +51,7 @@ export interface GalleryPickerPopoverProps {
 export const GalleryPickerPopover = ({
   accept,
   children,
+  galleryOnly,
   ids,
   label,
   openingScope,
@@ -91,6 +94,7 @@ export const GalleryPickerPopover = ({
             <Suspense fallback={PICKER_FALLBACK}>
               <GalleryPickerView
                 accept={accept}
+                galleryOnly={galleryOnly}
                 openingScope={openingScope}
                 searchInputRef={searchInputRef}
                 selection={selection}

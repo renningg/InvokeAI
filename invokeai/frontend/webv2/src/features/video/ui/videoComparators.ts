@@ -28,6 +28,8 @@ export const areVideoValuesEqual = (left: VideoWidgetValues, right: VideoWidgetV
   }
 
   return (
+    stableStringify(left.hostedReferenceImages) === stableStringify(right.hostedReferenceImages) &&
+    stableStringify(left.hostedReferenceVideo) === stableStringify(right.hostedReferenceVideo) &&
     stableStringify(left.hostedH3) === stableStringify(right.hostedH3) &&
     left.modelKey === right.modelKey &&
     left.h3TaskOverride === right.h3TaskOverride &&

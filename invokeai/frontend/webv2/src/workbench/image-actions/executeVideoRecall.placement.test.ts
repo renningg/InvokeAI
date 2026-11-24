@@ -59,7 +59,7 @@ describe('placeInitialVideo', () => {
       initialVideo: false,
       conditioningAudio: false,
       conditioningVideo: false,
-      referenceVideo: false,
+      referenceVideo: true,
     });
     expect(placeInitialVideo({ models: [WAN_I2V], video: clip, videoValues })).toEqual({ status: 'unsupported' });
   });
@@ -116,6 +116,34 @@ describe('placeInitialVideo', () => {
 });
 
 describe('appendReferenceVideo', () => {
+  it('stages a whole hosted clip from Gallery, keeping a local clip and its stream selection intact', () => {
+    const values = panel(REF2VA, {
+      hostedH3: { model: 'MiniMax-H3-Lite', input: 'frames', ratio: 'adaptive' },
+      references: [
+        { kind: 'image', detail: 'match', image: { image_name: 'private.png', width: 512, height: 512 } },
+        { ...videoReference('local.mp4'), conditioning: 'audio' },
+      ],
+    });
+    const place = (item: typeof clip & { mediaOrigin?: string }, videoValues = values) =>
+      appendReferenceVideo({ models: [REF2VA], video: item, videoValues });
+    const video = { ...clip, fps: 24 };
+    expect(place({ ...video, mediaOrigin: 'audio_upload' })).toMatchObject({ status: 'invalid' });
+    const result = place(video);
+    expect(result).toMatchObject({
+      status: 'appended',
+      patch: {
+        hostedH3: { input: 'references', ratio: '16:9' },
+        hostedReferenceImages: [],
+        hostedReferenceVideo: { video_name: 'clip.mp4', durationSeconds: 5, fps: 24 },
+      },
+    });
+    if (result.status !== 'appended') {
+      throw new Error('Expected a staged Gallery reference');
+    }
+    expect(result.patch).not.toHaveProperty('references');
+    expect(place({ ...video, name: 'another.mp4' }, { ...values, ...result.patch })).toEqual({ status: 'full' });
+  });
+
   it('appends footage as a short video-and-audio sample, and wrapped audio whole as a soundtrack', () => {
     // 20 s at 16 fps = 320 frames: longer than the 200-frame default sample.
     const long = { ...clip, durationSeconds: 20, name: 'long.mp4' };

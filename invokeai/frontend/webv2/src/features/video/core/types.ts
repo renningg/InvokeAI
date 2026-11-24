@@ -16,6 +16,15 @@ export interface HostedH3Settings {
   generateAudio: boolean;
   input: 'text' | 'frames' | 'references';
 }
+/** A whole Gallery video explicitly selected for the paid provider, independent of the local sample and streams. */
+export interface HostedH3ReferenceVideo {
+  video_name: string;
+  width: number;
+  height: number;
+  durationSeconds: number;
+  fps?: number;
+}
+
 export interface HostedH3Status {
   configured: boolean;
   region: 'cn' | 'global' | null;
@@ -155,6 +164,9 @@ export interface VideoSettings extends DynamicPromptsSettings {
 
 export interface VideoWidgetValues extends VideoSettings {
   hostedH3?: HostedH3Settings;
+  hostedReferenceVideo?: HostedH3ReferenceVideo | null;
+  /** Explicit hosted picks. Older hosted image-only panels adopt their recorded list on load. */
+  hostedReferenceImages?: ImageWithDims[];
   /** The selected main model; null until the user picks one (or none is installed). */
   model: MainModelConfig | null;
 }

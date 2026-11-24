@@ -179,16 +179,7 @@ const SingleImageHandOffItems = ({
     });
     generation.setSource('upscale');
   }, [generation, image.height, image.imageName, image.width, openWidget, widgets]);
-  const handleSendToVideo = useCallback(() => {
-    openWidget('video', { preferredRegions: ['left'] });
-    // A frame, an initial video and Ref2VA references claim one conditioning slot: a frame clears the rivals.
-    widgets.patchValues('video', {
-      firstFrameImage: { height: image.height, image_name: image.imageName, width: image.width },
-      references: [],
-      sourceVideo: null,
-    });
-    generation.setSource('video');
-  }, [generation, image.height, image.imageName, image.width, openWidget, widgets]);
+  const handleSendToVideo = useCallback(() => actions.sendImageToVideo(image), [actions, image]);
 
   return (
     <>
