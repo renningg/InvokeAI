@@ -1,10 +1,14 @@
+import asyncio
 import json
 import os
 import re
+import subprocess
 import tempfile
 import traceback
 from collections.abc import Iterator
+from contextlib import suppress
 from pathlib import Path
+from threading import Event
 from typing import Annotated, Any, BinaryIO, Optional
 
 from fastapi import Body, HTTPException, Query, Request, Response
@@ -41,7 +45,9 @@ from invokeai.app.api.routers._limits import MAX_COPY_BATCH_SIZE, MAX_VIDEO_BATC
 from invokeai.app.api.routers.images import WorkflowAndGraphResponse
 from invokeai.app.invocations.fields import MetadataField, MetadataFieldValidator
 from invokeai.app.services.board_access.board_access_common import ItemAction
+from invokeai.app.services.external_generation.minimax_video import VideoReferenceInfo, get_minimax_reference_info
 from invokeai.app.services.image_records.image_records_common import ImageCategory, ResourceOrigin, is_gallery_category
+from invokeai.app.services.session_processor.session_processor_common import CanceledException
 from invokeai.app.services.shared.pagination import MAX_PAGE_SIZE, OffsetPaginatedResults, SQLiteDirection
 from invokeai.app.services.video_files.video_files_common import VideoFileNotFoundException
 from invokeai.app.services.video_records.video_records_common import (
@@ -709,6 +715,42 @@ def get_video_dto(
         raise HTTPException(status_code=404)
     redact_project_ids([video_dto], current_user)
     return video_dto
+
+
+@videos_router.get("/i/{video_name}/reference-info", operation_id="get_video_reference_info")
+async def get_video_reference_info(
+    current_user: CurrentUserOrDefault, video_name: str, request: Request, response: Response
+) -> VideoReferenceInfo:
+    """Read the selected Gallery file's size and exact timing for the MiniMax reference picker."""
+    canceled = Event()
+
+    async def cancel_on_disconnect() -> None:
+        while (await request.receive())["type"] != "http.disconnect":
+            continue
+        canceled.set()
+
+    def inspect() -> VideoReferenceInfo:
+        _assert_video_read_access(video_name, current_user)
+        path = Path(ApiDependencies.invoker.services.videos.get_path(video_name))
+        return get_minimax_reference_info(path, canceled.is_set)
+
+    response.headers["Cache-Control"] = "no-store"
+    listener = asyncio.create_task(cancel_on_disconnect())
+    try:
+        return await run_in_threadpool(inspect)
+    except CanceledException:
+        raise HTTPException(status_code=499, detail="Client disconnected")
+    except (VideoRecordNotFoundException, VideoFileNotFoundException, FileNotFoundError):
+        raise HTTPException(status_code=404, detail="Video not found")
+    except (TimeoutError, subprocess.TimeoutExpired):
+        raise HTTPException(status_code=503, detail="Video inspection is unavailable. Try again.")
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Unable to inspect the reference video. Select a readable clip.")
+    finally:
+        canceled.set()
+        listener.cancel()
+        with suppress(asyncio.CancelledError):
+            await listener
 
 
 @videos_router.get(

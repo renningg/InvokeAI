@@ -10018,6 +10018,52 @@
         ]
       }
     },
+    "/api/v1/videos/i/{video_name}/reference-info": {
+      "get": {
+        "tags": ["videos"],
+        "summary": "Get Video Reference Info",
+        "description": "Read the selected Gallery file's size and exact timing for the MiniMax reference picker.",
+        "operationId": "get_video_reference_info",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "video_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Video Name"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VideoReferenceInfo"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/videos/i/{video_name}/metadata": {
       "get": {
         "tags": ["videos"],
@@ -131059,6 +131105,40 @@
         "type": "object",
         "required": ["video_name"],
         "title": "VideoRefParameter"
+      },
+      "VideoReferenceInfo": {
+        "properties": {
+          "file_size_bytes": {
+            "type": "integer",
+            "title": "File Size Bytes"
+          },
+          "fps": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fps"
+          },
+          "duration": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration"
+          }
+        },
+        "type": "object",
+        "required": ["file_size_bytes", "fps", "duration"],
+        "title": "VideoReferenceInfo",
+        "description": "Size of the MP4 itself and precise timing. Empty and oversized files have no timing."
       },
       "VideoReferenceParameter": {
         "properties": {

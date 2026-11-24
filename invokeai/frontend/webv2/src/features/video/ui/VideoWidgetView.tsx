@@ -151,14 +151,14 @@ const VideoModelReconciler = ({
 
 /** `instance` ties the sections to the header's jump menu; a view rendered outside a widget frame has none. */
 export const VideoWidgetView = ({ instance }: { instance?: { id: string } }) => {
-  const { rawValues } = useVideoUi();
+  const { rawValues, projectId } = useVideoUi();
   const values = rawValues.hostedH3 ? normalizeVideoWidgetValues(rawValues) : null;
   return (
     <>
       <VideoServiceField hosted={Boolean(values?.hostedH3)} />
       {values?.hostedH3 ? (
         <Suspense fallback={LOADING_HOSTED_PANEL}>
-          <HostedH3Panel hosted={values.hostedH3} values={values} />
+          <HostedH3Panel key={projectId} hosted={values.hostedH3} values={values} />
         </Suspense>
       ) : (
         <LocalVideoPanel instance={instance} />

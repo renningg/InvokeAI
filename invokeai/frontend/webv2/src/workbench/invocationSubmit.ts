@@ -16,6 +16,7 @@ import { ensureGalleryBoardDestinations } from '@features/gallery/queries';
 import { resolveDynamicPrompts } from '@features/generation/prompts';
 import { sanitizeBatchCount } from '@features/generation/settings';
 import { normalizeUpscaleWidgetValues } from '@features/upscale';
+import { hasPendingReferenceSelection, normalizeVideoWidgetValues } from '@features/video';
 import { getWorkflowBatchCapReason } from '@features/workflow/graph';
 import { getInvocationTemplatesSnapshot } from '@features/workflow/react';
 import { planWorkflowBatch } from '@features/workflow/utility';
@@ -177,6 +178,27 @@ const resolveWorkflowGeneratorsForRoute = async (
   return resolutions;
 };
 
+const isReferenceSelectionPending = (
+  route: ResolvedInvocationRoute,
+  project: Project,
+  owner: AccountScope,
+  commands: Pick<WorkbenchCommands, 'notifications'>
+) => {
+  if (
+    route.sourceId !== 'video' ||
+    !getProjectWidgetValues(project, 'video').hostedH3 ||
+    !hasPendingReferenceSelection(owner, project.id)
+  ) {
+    return false;
+  }
+  commands.notifications.add({
+    kind: 'info',
+    title: 'Wait for the MiniMax reference video check to finish, then invoke again.',
+    titleKey: 'widgets.video.hosted.referenceChecking',
+  });
+  return true;
+};
+
 export const submitResolvedInvocation = async ({
   commands,
   formatCanvasInvocationFailure,
@@ -190,7 +212,7 @@ export const submitResolvedInvocation = async ({
   scopedDefaults,
   workflowId,
 }: SubmitResolvedInvocationDeps): Promise<void> => {
-  if (!isAccountScopeCurrent(owner)) {
+  if (!isAccountScopeCurrent(owner) || isReferenceSelectionPending(route, project, owner, commands)) {
     return;
   }
 
@@ -359,9 +381,40 @@ const dispatchResolvedInvocation = async (
     return;
   }
 
+  let checkedHostedReferenceName: string | undefined;
+  if (route.sourceId === 'video') {
+    const raw = getProjectWidgetValues(project, 'video');
+    const values = raw.hostedH3 ? normalizeVideoWidgetValues(raw) : null;
+    const reference = values?.hostedH3?.input === 'references' ? values.hostedReferenceVideo : null;
+    if (reference) {
+      try {
+        const { inspectHostedH3ReferenceVideo } = await import('@features/video/referenceInfo');
+        await inspectHostedH3ReferenceVideo(reference, owner.signal);
+        checkedHostedReferenceName = reference.video_name;
+      } catch (error) {
+        if (isAccountScopeCurrent(owner)) {
+          commands.notifications.add({
+            kind: 'error',
+            message: getApiErrorMessage(error, 'Could not read the reference video.'),
+            title: 'Could not check the MiniMax reference video. Choose another clip or try again.',
+            titleKey: 'widgets.video.hosted.referenceCheckFailed',
+          });
+        }
+        return;
+      }
+      if (!isAccountScopeCurrent(owner)) {
+        return;
+      }
+    }
+  }
+
+  if (isReferenceSelectionPending(route, project, owner, commands)) {
+    return;
+  }
   commands.generation.submitResolved({
     runtime: captureInvocationRuntimeInputs(route.sourceId),
     ...(route.expectedMiniMaxRegion ? { expectedMiniMaxRegion: route.expectedMiniMaxRegion } : {}),
+    ...(checkedHostedReferenceName ? { checkedHostedReferenceName } : {}),
     backendSupportsCancellation: true,
     models,
     ...expansion,

@@ -1,9 +1,63 @@
 import type { GalleryItemRef, GalleryVideoItem } from '@features/gallery';
 import type { VideoWidgetValues } from '@features/video/core/types';
 import type { VideoSection } from '@features/video/core/videoPolicies';
+import type { AccountScope } from '@platform/state/accountLifecycle';
 import type { ReactNode } from 'react';
 
-import { createContext, use, useMemo } from 'react';
+import { createContext, use, useMemo, useSyncExternalStore } from 'react';
+
+// A choice belongs to its account and project even when React hides its panel in an Activity.
+interface PendingReferenceSelection {
+  controller: AbortController;
+  videoName: string;
+}
+const pendingSelections = new WeakMap<AccountScope, Map<string, PendingReferenceSelection>>();
+const selectionListeners = new Set<() => void>();
+const subscribeToSelections = (listener: () => void) => {
+  selectionListeners.add(listener);
+  return () => {
+    selectionListeners.delete(listener);
+  };
+};
+const notifySelections = () => selectionListeners.forEach((listener) => listener());
+
+export const hasPendingReferenceSelection = (owner: AccountScope, projectId: string) =>
+  pendingSelections.get(owner)?.has(projectId) === true;
+
+export const usePendingReferenceName = (owner: AccountScope, projectId: string) =>
+  useSyncExternalStore(subscribeToSelections, () => pendingSelections.get(owner)?.get(projectId)?.videoName ?? null);
+
+export const cancelReferenceSelection = (owner: AccountScope, projectId: string) => {
+  pendingSelections.get(owner)?.get(projectId)?.controller.abort();
+};
+
+export const beginReferenceSelection = (owner: AccountScope, projectId: string, videoName: string) => {
+  const pending = pendingSelections.get(owner) ?? new Map<string, PendingReferenceSelection>();
+  pendingSelections.set(owner, pending);
+  const previous = pending.get(projectId);
+  const controller = new AbortController();
+  const selection = { controller, videoName };
+  pending.set(projectId, selection);
+  previous?.controller.abort();
+  const signal = AbortSignal.any([controller.signal, owner.signal]);
+  const isCurrent = () => !signal.aborted && pending.get(projectId) === selection;
+  const finish = () => {
+    if (pending.get(projectId) === selection) {
+      pending.delete(projectId);
+      notifySelections();
+    }
+  };
+  signal.addEventListener('abort', finish, { once: true });
+  notifySelections();
+  return {
+    signal,
+    isCurrent,
+    finish: () => {
+      signal.removeEventListener('abort', finish);
+      finish();
+    },
+  };
+};
 
 /** The persisted open state of each Video section, kept with Generate's under the same per-user preference. */
 export const VIDEO_SECTION_IDS = {

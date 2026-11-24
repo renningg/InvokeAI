@@ -11,9 +11,13 @@ same fixture pattern as test_boards_multiuser. The storage-level user_id
 filter is covered separately in tests/app/services/video_records.
 """
 
+import asyncio
+import base64
 import inspect
 import json
+import subprocess
 from pathlib import Path
+from threading import BoundedSemaphore
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -37,6 +41,7 @@ from invokeai.app.api.routers.videos import (
     update_video,
 )
 from invokeai.app.api_app import app
+from invokeai.app.services.external_generation import minimax_video
 from invokeai.app.services.invoker import Invoker
 from invokeai.app.services.shared.database.database import Database
 from invokeai.app.services.shared.pagination import OffsetPaginatedResults
@@ -44,7 +49,8 @@ from invokeai.app.services.users.users_common import UserCreateRequest
 from invokeai.app.services.video_files.video_files_common import VideoFileNotFoundException
 from invokeai.app.services.video_records.video_records_common import VideoRecordNotFoundException
 from invokeai.app.services.videos.videos_common import VideoDTO
-from invokeai.app.util import video_thumbnails
+from invokeai.app.util import video_audio, video_thumbnails
+from invokeai.app.util.mp4_metadata import read_mp4_movie_duration, read_mp4_video_frame_rate
 from invokeai.app.util.video_ingest import MediaProbe
 from tests.fixtures.sqlite_database import sqlite_cursor
 
@@ -1152,6 +1158,254 @@ def test_remove_video_from_board_rejects_anyone_below_editor(
     )
     assert response.status_code == status.HTTP_403_FORBIDDEN
     mock_invoker.services.board_video_records.remove_video_from_board.assert_not_called()
+
+
+def _get_owned_reference_info(client: TestClient, invoker: Invoker, token: str, path: Path):
+    user = invoker.services.users.get_by_email("user1@test.com")
+    assert user is not None
+    invoker.services.video_records.get_user_id.return_value = user.user_id
+    invoker.services.videos.get_path.return_value = path
+    return client.get(f"/api/v1/videos/i/{path.name}/reference-info", headers={"Authorization": f"Bearer {token}"})
+
+
+def _write_timing_fixture(path: Path, fps: str, movflags: str = "faststart", offset: int = 0, frames: int = 72) -> None:
+    import imageio_ffmpeg
+
+    subprocess.run(
+        [
+            imageio_ffmpeg.get_ffmpeg_exe(),
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=s=256x256:r={fps}",
+            "-frames:v",
+            str(frames),
+            "-c:v",
+            "libx264",
+            "-threads",
+            "1",
+            "-bf",
+            "0",
+            "-g",
+            "24",
+            "-movflags",
+            movflags,
+            "-output_ts_offset",
+            str(offset),
+            str(path),
+        ],
+        check=True,
+    )
+
+
+def _reference_request(path: Path) -> minimax_video.MiniMaxVideoRequest:
+    return minimax_video.MiniMaxVideoRequest(
+        model="MiniMax-H3", prompt="motion", resolution="768P", duration=4, ratio="1:1", reference_video=lambda: path
+    )
+
+
+@pytest.mark.ffmpeg
+@pytest.mark.parametrize("movflags", ["faststart", "frag_keyframe+empty_moov", "frag_keyframe"])
+def test_reference_info_uses_video_bytes_and_exact_track_timing(
+    client: TestClient, mock_invoker: Invoker, user1_token: str, tmp_path: Path, movflags: str
+):
+    path = tmp_path / "camera.mp4"
+    _write_timing_fixture(path, "23.975", movflags)
+    # Gallery DTO fps may be rounded, and its size for disk accounting includes companions.
+    mock_invoker.services.videos.get_dto.return_value = MagicMock(fps=23.98, file_size_bytes=path.stat().st_size + 5000)
+    response = _get_owned_reference_info(client, mock_invoker, user1_token, path)
+    assert response.status_code == 200
+    assert response.json() == {
+        "file_size_bytes": path.stat().st_size,
+        "fps": pytest.approx(23.975, abs=1e-9),
+        "duration": pytest.approx(72 / 23.975, abs=0.001),
+    }
+
+
+@pytest.mark.ffmpeg
+def test_reference_info_uses_submitted_duration_for_nonzero_start(
+    client: TestClient, mock_invoker: Invoker, user1_token: str, tmp_path: Path
+):
+    path = tmp_path / "offset.mp4"
+    _write_timing_fixture(path, "24", offset=14)
+    # The header counts 14s of empty timeline; the submitted clip lasts only 3s.
+    assert read_mp4_movie_duration(path) == 17
+    response = _get_owned_reference_info(client, mock_invoker, user1_token, path)
+    assert response.status_code == 200
+    assert response.json()["duration"] == 3
+    assert response.json()["fps"] == 24
+    payload = json.loads(_reference_request(path).encode("global", lambda: False))
+    video_url = payload["content"][-1]["video_url"]["url"]
+    outgoing = tmp_path / "outgoing.mp4"
+    outgoing.write_bytes(base64.b64decode(video_url.split(",", 1)[1]))
+    assert read_mp4_movie_duration(outgoing) == response.json()["duration"]
+    assert read_mp4_video_frame_rate(outgoing) == response.json()["fps"]
+
+
+@pytest.mark.ffmpeg
+def test_reference_info_trimmed_frame_rate_matches_generation_rejection(
+    client: TestClient, mock_invoker: Invoker, user1_token: str, tmp_path: Path
+):
+    import imageio_ffmpeg
+
+    source = tmp_path / "source.mp4"
+    trimmed = tmp_path / "trimmed.mp4"
+    _write_timing_fixture(source, "24000/1001")
+    subprocess.run(
+        [imageio_ffmpeg.get_ffmpeg_exe(), "-v", "error", "-ss", "0.6", "-i", str(source), "-c", "copy", str(trimmed)],
+        check=True,
+    )
+    assert read_mp4_video_frame_rate(trimmed) == pytest.approx(24000 / 1001)
+    response = _get_owned_reference_info(client, mock_invoker, user1_token, trimmed)
+    assert response.status_code == 200
+    assert response.json()["fps"] == pytest.approx(23.773, abs=0.001)
+    with pytest.raises(ValueError, match="23.976–60 fps"):
+        _reference_request(trimmed).encode("global", lambda: False)
+
+
+@pytest.mark.ffmpeg
+@pytest.mark.parametrize(
+    ("frames", "fps", "valid"),
+    [(48, "24.01", False), (48, "24", True), (360, "24", True), (360, "23.999", False)],
+)
+def test_reference_info_and_submission_keep_submillisecond_duration_boundaries(
+    client: TestClient, mock_invoker: Invoker, user1_token: str, tmp_path: Path, frames: int, fps: str, valid: bool
+):
+    path = tmp_path / "edge.mp4"
+    _write_timing_fixture(path, fps, frames=frames)
+    if fps == "24.01":
+        # The source movie header rounds up 1.999167 seconds to two whole seconds.
+        assert read_mp4_movie_duration(path) == 2
+    response = _get_owned_reference_info(client, mock_invoker, user1_token, path)
+    assert response.status_code == 200
+    duration = response.json()["duration"]
+    assert duration == pytest.approx(frames / float(fps), abs=1e-9)
+    assert (2 <= duration <= 15) == valid
+    request = _reference_request(path)
+    if valid:
+        assert json.loads(request.encode("global", lambda: False))["content"][-1]["role"] == "reference_video"
+    else:
+        with pytest.raises(ValueError, match="2–15 seconds"):
+            request.encode("global", lambda: False)
+
+
+def test_reference_info_returns_oversize_before_attempting_media_inspection(
+    client: TestClient, mock_invoker: Invoker, user1_token: str, tmp_path: Path
+):
+    path = tmp_path / "oversized.mp4"
+    with path.open("wb") as media:
+        media.truncate(50_000_001)
+    response = _get_owned_reference_info(client, mock_invoker, user1_token, path)
+    assert response.status_code == 200
+    assert response.json() == {"file_size_bytes": 50_000_001, "fps": None, "duration": None}
+
+
+def test_reference_info_bounds_active_probes_and_releases_capacity_after_timeout(
+    client: TestClient, mock_invoker: Invoker, user1_token: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    path = tmp_path / "camera.mp4"
+    path.write_bytes(b"video")
+    slots = BoundedSemaphore(1)
+    monkeypatch.setattr(minimax_video, "_REFERENCE_PROBE_SLOTS", slots)
+    with patch.object(
+        minimax_video, "_remux_reference_video", side_effect=subprocess.TimeoutExpired(["ffmpeg"], 60)
+    ) as remux:
+        with slots:
+            assert _get_owned_reference_info(client, mock_invoker, user1_token, path).status_code == 503
+            remux.assert_not_called()
+        assert _get_owned_reference_info(client, mock_invoker, user1_token, path).status_code == 503
+        remux.assert_called_once()
+    assert slots.acquire(blocking=False)
+    slots.release()
+
+
+@pytest.mark.ffmpeg
+def test_reference_info_disconnect_cancels_ffmpeg_and_releases_slot(
+    mock_invoker: Invoker, user1_token: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    path = tmp_path / "playing.mp4"
+    path.write_bytes(b"video")
+    user = mock_invoker.services.users.get_by_email("user1@test.com")
+    assert user is not None
+    mock_invoker.services.video_records.get_user_id.return_value = user.user_id
+    mock_invoker.services.videos.get_path.return_value = path
+    slots = BoundedSemaphore(1)
+    monkeypatch.setattr(minimax_video, "_REFERENCE_PROBE_SLOTS", slots)
+    prepared: list[Path] = []
+
+    async def abandon_probe() -> list[dict]:
+        running = asyncio.Event()
+        loop = asyncio.get_running_loop()
+
+        def slow_ffmpeg(args, *, timeout, is_canceled, capture_stdout):
+            prepared.append(Path(args[-1]))
+            polls = 0
+
+            def check_cancel():
+                nonlocal polls
+                polls += 1
+                if polls == 2:  # The first poll is before Popen, the second is while FFmpeg runs.
+                    loop.call_soon_threadsafe(running.set)
+                return is_canceled()
+
+            return video_audio.run_ffmpeg_process(
+                ["-re", "-f", "lavfi", "-i", "color=s=16x16:r=1", "-f", "null", "-"],
+                timeout=min(timeout, 5),
+                is_canceled=check_cancel,
+            )
+
+        monkeypatch.setattr(minimax_video, "run_ffmpeg_process", slow_ffmpeg)
+        route = f"/api/v1/videos/i/{path.name}/reference-info"
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0", "spec_version": "2.3"},
+            "http_version": "1.1",
+            "method": "GET",
+            "scheme": "http",
+            "path": route,
+            "raw_path": route.encode(),
+            "query_string": b"",
+            "headers": [(b"host", b"testserver"), (b"authorization", f"Bearer {user1_token}".encode())],
+            "client": ("127.0.0.1", 12345),
+            "server": ("testserver", 80),
+        }
+        messages = []
+        sent_request = False
+
+        async def receive():
+            nonlocal sent_request
+            if not sent_request:
+                sent_request = True
+                return {"type": "http.request", "body": b""}
+            await running.wait()
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            messages.append(message)
+
+        await asyncio.wait_for(app(scope, receive, send), timeout=10)
+        return messages
+
+    messages = asyncio.run(abandon_probe())
+    assert next(message["status"] for message in messages if message["type"] == "http.response.start") == 499
+    assert len(prepared) == 1 and not prepared[0].parent.exists()
+    assert slots.acquire(blocking=False)
+    slots.release()
+
+
+def test_private_reference_info_requires_read_access_before_opening_source(
+    client: TestClient, mock_invoker: Invoker, user2_token: str
+):
+    route = "/api/v1/videos/i/private.mp4/reference-info"
+    mock_invoker.services.video_records.get_user_id.return_value = "different-owner"
+    mock_invoker.services.board_video_records.get_board_for_video.return_value = None
+    assert client.get(route).status_code == 401
+    assert client.get(route, headers={"Authorization": f"Bearer {user2_token}"}).status_code == 403
+    mock_invoker.services.video_records.exists.return_value = False
+    assert client.get(route, headers={"Authorization": f"Bearer {user2_token}"}).status_code == 404
+    mock_invoker.services.videos.get_path.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

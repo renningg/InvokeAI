@@ -354,15 +354,9 @@ describe('getVideoWidgetValidationReasons', () => {
       1
     );
     expect(getVideoWidgetValidationReasons({ ...values, hostedReferenceVideo: null })).toHaveLength(1);
-    for (const changes of [
-      { durationSeconds: 1.99 },
-      { durationSeconds: 15.01 },
-      { fps: 23.97 },
-      { fps: 60.01 },
-      { width: 641 },
-      { height: 255 },
-      { width: 5761 },
-    ]) {
+    // Historical timing fields came from a rounded Gallery listing; the command probes the file before queuing.
+    expect(getVideoWidgetValidationReasons({ ...values, hostedReferenceVideo: { ...clip, fps: 23.97 } })).toEqual([]);
+    for (const changes of [{ width: 641 }, { height: 255 }, { width: 5761 }]) {
       const invalid = { ...values, hostedReferenceVideo: { ...clip, ...changes } };
       expect(getVideoWidgetValidationReasons(invalid)).toHaveLength(1);
       expect(getVideoWidgetValidationReasons({ ...invalid, hostedH3: { ...values.hostedH3, input: 'text' } })).toEqual(

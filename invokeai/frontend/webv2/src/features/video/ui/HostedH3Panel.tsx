@@ -1,21 +1,23 @@
 /* oxlint-disable react-perf/jsx-no-new-function-as-prop -- the React Compiler memoizes field handlers, including those bound to image slots. */
-import type { GalleryItem } from '@features/gallery';
+import type { GalleryItem, GalleryItemRef } from '@features/gallery';
 import type { GenerateLora, ImageWithDims } from '@features/generation/contracts';
 import type { HostedH3Settings, VideoWidgetValues } from '@features/video/core/types';
 
 import { HStack, SimpleGrid, Stack, Switch, Text } from '@chakra-ui/react';
+import { galleryItems } from '@features/gallery';
 import { GalleryMediaSlot } from '@features/gallery/mediaSlot';
 import { getDynamicPromptsConfig } from '@features/generation/settings';
 import { openModelManager, useMiniMaxStatus, useModelsUi } from '@features/models';
 import { createHostedH3ReferenceVideo, VIDEO_REFERENCE_MAX_IMAGES } from '@features/video/core/settings';
 import {
-  getHostedH3ReferenceVideoIssue,
   getHostedH3Models,
   getHostedH3MinDuration,
   getHostedH3Ratios,
   getHostedH3Resolutions,
   reconcileHostedH3Ratio,
 } from '@features/video/core/videoPolicies';
+import { captureAccountScope } from '@platform/state/accountLifecycle';
+import { getApiErrorMessage } from '@platform/transport/http';
 import { Button } from '@platform/ui/Button';
 import { Field } from '@platform/ui/Field';
 import { useMemo } from 'react';
@@ -24,7 +26,12 @@ import { useTranslation } from 'react-i18next';
 import { VideoPromptFields } from './VideoFormFields';
 import { VideoFrameImageField } from './VideoFrameImageField';
 import { VideoChoiceField } from './VideoModelField';
-import { useVideoUi } from './VideoUiContext';
+import {
+  beginReferenceSelection,
+  cancelReferenceSelection,
+  usePendingReferenceName,
+  useVideoUi,
+} from './VideoUiContext';
 
 const VIDEO_ACCEPT = ['video'] as const;
 const REFERENCE_SLOTS = [1, 2, 3, 4, 5, 6, 7, 8, 9];
@@ -62,23 +69,52 @@ export const HostedH3Panel = ({ values, hosted }: { values: VideoWidgetValues; h
         : null,
     [selectedVideo]
   );
-  const changeVideo = (item: GalleryItem | null) => {
-    if (item && item.kind !== 'video') {
+  const checkingName = usePendingReferenceName(captureAccountScope(), projectId);
+  const changeVideo = async (choice: GalleryItem | GalleryItemRef | null) => {
+    if (choice && choice.kind !== 'video') {
       return;
     }
-    const video = item ? createHostedH3ReferenceVideo(item) : null;
-    const issue = video && getHostedH3ReferenceVideoIssue(video, item?.mediaOrigin);
-    if (issue) {
-      notifications.info(issue);
+    const owner = captureAccountScope();
+    const commit = (video: typeof selectedVideo) =>
+      patchValues((current) =>
+        current.hostedH3?.model === hosted.model &&
+        current.hostedH3.input === 'references' &&
+        current.hostedReferenceVideo?.video_name === selectedVideo?.video_name
+          ? { hostedReferenceVideo: video }
+          : {}
+      );
+    if (!choice) {
+      cancelReferenceSelection(owner, projectId);
+      commit(null);
       return;
     }
-    patchValues((current) =>
-      current.hostedH3?.input === 'references' && current.hostedReferenceVideo?.video_name === selectedVideo?.video_name
-        ? { hostedReferenceVideo: video }
-        : {}
-    );
+    const request = beginReferenceSelection(owner, projectId, choice.name);
+    try {
+      const item = 'width' in choice ? choice : await galleryItems.resolve(choice, request.signal);
+      if (!request.isCurrent() || item.kind !== 'video') {
+        return;
+      }
+      const { inspectHostedH3ReferenceVideo } = await import('@features/video/referenceInfo');
+      const video = await inspectHostedH3ReferenceVideo(
+        createHostedH3ReferenceVideo(item),
+        request.signal,
+        item.mediaOrigin
+      );
+      if (request.isCurrent()) {
+        commit(video);
+      }
+    } catch (error) {
+      if (request.isCurrent()) {
+        notifications.info(getApiErrorMessage(error, t('widgets.video.hosted.referenceCheckFailed')));
+      }
+    } finally {
+      request.finish();
+    }
   };
-  const setOptions = (changes: Partial<HostedH3Settings>) =>
+  const setOptions = (changes: Partial<HostedH3Settings>) => {
+    if (changes.model || changes.input) {
+      cancelReferenceSelection(captureAccountScope(), projectId);
+    }
     patchValues((current) => {
       if (!current.hostedH3) {
         return {};
@@ -93,6 +129,7 @@ export const HostedH3Panel = ({ values, hosted }: { values: VideoWidgetValues; h
       }
       return { hostedH3: next };
     });
+  };
   const setFrame = (slot: 'firstFrameImage' | 'lastFrameImage', image: ImageWithDims | null) =>
     patchValues((current) => {
       if (current.hostedH3?.input !== 'frames') {
@@ -231,10 +268,25 @@ export const HostedH3Panel = ({ values, hosted }: { values: VideoWidgetValues; h
                 labels={videoSlotLabels}
                 value={videoSlotValue}
                 onChange={changeVideo}
+                onDropRef={changeVideo}
                 onFind={
                   selectedVideo ? () => findInGallery({ kind: 'video', name: selectedVideo.video_name }) : undefined
                 }
               />
+              {checkingName && (
+                <HStack>
+                  <Text role="status" fontSize="sm" color="fg.muted">
+                    {t('widgets.video.hosted.checkingReference', { name: checkingName })}
+                  </Text>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => cancelReferenceSelection(captureAccountScope(), projectId)}
+                  >
+                    {t('common.cancel')}
+                  </Button>
+                </HStack>
+              )}
             </Field>
             {values.references.some((entry) => entry.kind === 'video') && (
               <Text color="fg.muted" fontSize="sm">

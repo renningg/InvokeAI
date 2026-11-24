@@ -90,6 +90,7 @@ export const GalleryMediaSlot = ({
   thumbnail,
   value,
   onChange,
+  onDropRef,
   onFind,
   onUploadFile,
 }: {
@@ -112,6 +113,8 @@ export const GalleryMediaSlot = ({
   thumbnail?: ReactNode;
   value: GalleryMediaSlotValue | null;
   onChange: (item: GalleryItem | null) => void;
+  /** Allow a consumer to own an asynchronous drop from the moment it starts resolving the Gallery record. */
+  onDropRef?: (ref: GalleryItemRef) => void;
   /** Provide onFind only for gallery-owned media; it enables the thumbnail reveal badge. */
   onFind?: () => void;
   /** Takes a file the consumer stores itself; gallery-backed slots upload through the picker instead. */
@@ -184,10 +187,15 @@ export const GalleryMediaSlot = ({
       const data = event.active.data.current;
 
       if (!isInert && event.over?.id === dropId && acceptsDrag(data) && isGalleryItemDragData(data)) {
-        void adoptRef(data.items[0]!);
+        const ref = data.items[0]!;
+        if (onDropRef) {
+          onDropRef(ref);
+        } else {
+          void adoptRef(ref);
+        }
       }
     },
-    [acceptsDrag, adoptRef, dropId, isInert]
+    [acceptsDrag, adoptRef, dropId, isInert, onDropRef]
   );
 
   const uploadOptions = useMemo(() => ({ accept: getGalleryUploadAccept(accept), multiple: false }), [accept]);

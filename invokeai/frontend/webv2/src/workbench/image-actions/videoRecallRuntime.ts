@@ -14,6 +14,7 @@ import type { PendingRecallEvent, RecallRevealContext, RecallRuntime } from './r
 // lazy runtime would split them out of the image-actions chunk into one more request on every editor route.
 import {
   appendReferenceVideo,
+  prepareReferenceVideoPlacement,
   applyVideoRecallMetadata,
   getCurrentVideoValues,
   placeConditioningClip,
@@ -267,7 +268,21 @@ export const createVideoRecallRuntime = ({
         });
       }
     } else {
-      const placement = appendReferenceVideo({ models, video: toPlaceableVideo(event.video), videoValues });
+      const video = toPlaceableVideo(event.video);
+      const placement = videoValues.hostedH3
+        ? await prepareReferenceVideoPlacement({
+            models,
+            video,
+            videoValues,
+            readValues: readVideoValues,
+            owner,
+            projectId,
+            isCurrent: () => Boolean(queries.getProject(projectId)),
+          })
+        : appendReferenceVideo({ models, video, videoValues });
+      if (!placement) {
+        return;
+      }
 
       if (placement.status === 'appended') {
         commands.widgets.patchValues('video', placement.patch, projectId);

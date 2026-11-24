@@ -16,6 +16,7 @@ import { DEFAULT_HOSTED_H3 } from '@features/video/core/settings';
 import { getVideoModelSelectionResult, isVideoModelSelectable } from '@features/video/core/videoPolicies';
 import { syncVideoWidgetValuesWithModels } from '@features/video/core/widgetValues';
 import { flushWorkbenchDrafts } from '@platform/react/draftRegistry';
+import { captureAccountScope } from '@platform/state/accountLifecycle';
 import { Field } from '@platform/ui';
 import { Button } from '@platform/ui/Button';
 import { ConfirmDialog } from '@platform/ui/ConfirmDialog';
@@ -23,7 +24,7 @@ import { toaster } from '@platform/ui/toaster';
 import { useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import { useVideoUiActions } from './VideoUiContext';
+import { cancelReferenceSelection, useVideoUi, useVideoUiActions } from './VideoUiContext';
 
 export const VideoChoiceField = ({
   label,
@@ -48,13 +49,14 @@ export const VideoChoiceField = ({
 
 export const VideoServiceField = ({ hosted }: { hosted: boolean }) => {
   const { t } = useTranslation();
-  const { patchValues } = useVideoUiActions();
+  const { patchValues, projectId } = useVideoUi();
   return (
     <Stack px="2" pt="2">
       <VideoChoiceField
         label={t('widgets.video.hosted.service')}
         value={hosted ? 'minimax' : 'local'}
         onChange={(value) => {
+          cancelReferenceSelection(captureAccountScope(), projectId);
           flushWorkbenchDrafts();
           patchValues({ hostedH3: value === 'minimax' ? { ...DEFAULT_HOSTED_H3 } : undefined });
         }}

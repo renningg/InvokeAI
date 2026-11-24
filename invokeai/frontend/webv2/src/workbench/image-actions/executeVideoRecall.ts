@@ -16,6 +16,7 @@ import type { TFunction } from 'i18next';
 import { galleryImages, galleryItems } from '@features/gallery';
 import { fetchGalleryVideoMetadata } from '@features/gallery/queries';
 import {
+  beginReferenceSelection,
   createDefaultVideoWidgetValues,
   createHostedH3ReferenceVideo,
   getHostedH3ReferenceVideoIssue,
@@ -43,7 +44,7 @@ import {
   captureAccountScope,
   isAccountScopeCurrent,
 } from '@platform/state/accountLifecycle';
-import { ApiError } from '@platform/transport/http';
+import { ApiError, getApiErrorMessage } from '@platform/transport/http';
 
 import {
   buildVideoRecallSettings,
@@ -698,6 +699,68 @@ export const appendReferenceVideo = ({
     }),
     status: 'appended',
   };
+};
+
+/** Check a hosted Gallery choice against the original MP4 before assigning its one video slot. */
+export const prepareReferenceVideoPlacement = async ({
+  models,
+  video,
+  videoValues,
+  readValues,
+  owner,
+  projectId,
+  isCurrent,
+}: {
+  models: readonly ModelConfig[];
+  video: PlaceableVideo;
+  videoValues: Record<string, unknown>;
+  readValues: () => Record<string, unknown> | null;
+  projectId: string;
+  owner: AccountScope;
+  isCurrent: () => boolean;
+}): Promise<ReferenceVideoPlacement | null> => {
+  const initial = getCurrentVideoValues({ models, videoValues });
+  if (!initial.hostedH3 || initial.hostedReferenceVideo) {
+    return appendReferenceVideo({ models, video, videoValues });
+  }
+  const request = beginReferenceSelection(owner, projectId, video.name);
+  const stillCurrent = () => {
+    if (!request.isCurrent() || !isAccountScopeCurrent(owner) || !isCurrent()) {
+      return null;
+    }
+    const raw = readValues();
+    if (!raw) {
+      return null;
+    }
+    const latest = getCurrentVideoValues({ models, videoValues: raw });
+    return latest.hostedH3?.model === initial.hostedH3?.model &&
+      latest.hostedH3?.input === initial.hostedH3?.input &&
+      !latest.hostedReferenceVideo
+      ? raw
+      : null;
+  };
+  try {
+    const { inspectHostedH3ReferenceVideo } = await import('@features/video/referenceInfo');
+    const measured = await inspectHostedH3ReferenceVideo(
+      createHostedH3ReferenceVideo(video),
+      request.signal,
+      video.mediaOrigin
+    );
+    const current = stillCurrent();
+    return current
+      ? appendReferenceVideo({
+          models,
+          video: { ...video, durationSeconds: measured.durationSeconds, fps: measured.fps },
+          videoValues: current,
+        })
+      : null;
+  } catch (error) {
+    return stillCurrent()
+      ? { status: 'invalid', message: getApiErrorMessage(error, 'Could not check the MiniMax reference video.') }
+      : null;
+  } finally {
+    request.finish();
+  }
 };
 
 export type VideoImagePlacement =

@@ -2556,7 +2556,7 @@ export const getHostedH3ProviderIssue = (hosted: HostedH3Settings, status: Hoste
 const hasHostedH3MediaShape = ({ width, height }: { width: number; height: number }) =>
   Math.min(width, height) >= 256 && Math.max(width, height) <= 5760 && width / height >= 0.4 && width / height <= 2.5;
 
-export const getHostedH3ReferenceVideoIssue = (video: HostedH3ReferenceVideo, mediaOrigin?: string) => {
+const getHostedH3ReferenceVideoFormatIssue = (video: HostedH3ReferenceVideo, mediaOrigin?: string) => {
   if (mediaOrigin === 'audio_upload') {
     return 'Choose video footage for the MiniMax reference. Audio uploads have no picture.';
   }
@@ -2565,6 +2565,14 @@ export const getHostedH3ReferenceVideoIssue = (video: HostedH3ReferenceVideo, me
   }
   if (!hasHostedH3MediaShape(video)) {
     return 'MiniMax reference videos must be 256–5,760 pixels per side with an aspect ratio between 0.4 and 2.5.';
+  }
+  return null;
+};
+
+export const getHostedH3ReferenceVideoIssue = (video: HostedH3ReferenceVideo, mediaOrigin?: string) => {
+  const issue = getHostedH3ReferenceVideoFormatIssue(video, mediaOrigin);
+  if (issue) {
+    return issue;
   }
   if (!(video.durationSeconds >= 2 && video.durationSeconds <= 15)) {
     return 'MiniMax reference videos must be 2–15 seconds long.';
@@ -2603,7 +2611,8 @@ export const getHostedH3InputIssue = (settings: VideoWidgetValues, hosted: Hoste
       return 'Choose up to nine reference images, one Gallery video, or both for MiniMax.';
     }
     if (settings.hostedReferenceVideo) {
-      const issue = getHostedH3ReferenceVideoIssue(settings.hostedReferenceVideo);
+      // Saved projects may have rounded Gallery timings. Invoke checks the original MP4 before queuing.
+      const issue = getHostedH3ReferenceVideoFormatIssue(settings.hostedReferenceVideo);
       if (issue) {
         return issue;
       }

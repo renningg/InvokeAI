@@ -24,6 +24,7 @@ export { claimCanvasRecall, executeImageRecall, getCurrentGenerateValues } from 
 export { readRecordedModelRef } from './recordedModel';
 export {
   appendReferenceVideo,
+  prepareReferenceVideoPlacement,
   applyVideoRecallMetadata,
   executeVideoRecall,
   getCurrentVideoValues,

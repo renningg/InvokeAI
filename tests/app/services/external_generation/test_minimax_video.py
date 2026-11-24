@@ -570,6 +570,35 @@ def test_validates_actual_reference_streams_before_billing(http, tmp_path, video
 
 
 @pytest.mark.ffmpeg
+@pytest.mark.parametrize(("middle_size", "valid"), [("160x160", False), ("768x256", False), ("640x256", True)])
+def test_checks_dimensions_of_each_segment_before_submission(http, tmp_path, middle_size, valid):
+    # Stream-copy concatenation preserves the change in coded dimensions within the same H.264 track.
+    for name, size in (("outer", "320x320"), ("middle", middle_size)):
+        _ffmpeg(
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=s={size}:r=24:d=1",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            str(tmp_path / f"{name}.mp4"),
+        )
+    playlist = tmp_path / "clips.txt"
+    playlist.write_text("file 'outer.mp4'\nfile 'middle.mp4'\nfile 'outer.mp4'\n")
+    source = tmp_path / "joined.mp4"
+    _ffmpeg("-f", "concat", "-i", str(playlist), "-c", "copy", str(source))
+    request = replace(_REQUEST, reference_video=lambda: source)
+    if valid:
+        assert json.loads(request.encode("global", lambda: False))["content"][1]["role"] == "reference_video"
+    else:
+        with pytest.raises(ValueError, match="256–5760.*aspect ratio"), _generate(request):
+            pytest.fail("Submitted a clip with an out-of-bounds middle segment")
+    assert not http.calls
+
+
+@pytest.mark.ffmpeg
 def test_invalid_reference_file_and_cancellation_remove_the_prepared_copy(http, tmp_path, tagged_reference):
     request = replace(_REQUEST, reference_video=lambda: tagged_reference)
     # After a temporary remux exists, cancellation must prevent both validation/encoding and the paid POST.

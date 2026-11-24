@@ -2264,6 +2264,26 @@ export type paths = {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/videos/i/{video_name}/reference-info": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Video Reference Info
+         * @description Read the selected Gallery file's size and exact timing for the MiniMax reference picker.
+         */
+        get: operations["get_video_reference_info"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/videos/i/{video_name}/metadata": {
         parameters: {
             query?: never;
@@ -58922,6 +58942,18 @@ export type components = {
              */
             video_name: string;
         };
+        /**
+         * VideoReferenceInfo
+         * @description Size of the MP4 itself and precise timing. Empty and oversized files have no timing.
+         */
+        VideoReferenceInfo: {
+            /** File Size Bytes */
+            file_size_bytes: number;
+            /** Fps */
+            fps: number | null;
+            /** Duration */
+            duration: number | null;
+        };
         /** VideoReferenceParameter */
         VideoReferenceParameter: {
             /**
@@ -66956,6 +66988,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DeleteVideosResult"];
+                };
+            };
+        };
+    };
+    get_video_reference_info: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                video_name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VideoReferenceInfo"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

@@ -3270,6 +3270,15 @@ export const startMockBackend = async (port, { clock = Date.now, profile = 'empt
         });
       }
 
+      const referenceInfoMatch = /^\/api\/v1\/videos\/i\/([^/]+)\/reference-info$/.exec(path);
+      if (method === 'GET' && referenceInfoMatch) {
+        const video = state.videos.get(decodeURIComponent(referenceInfoMatch[1]));
+
+        return video && video.owner_user_id === MOCK_USER_ID
+          ? json(200, { file_size_bytes: FIXTURE_VIDEO.length, fps: video.fps, duration: video.duration })
+          : json(404, { detail: 'Video not found' });
+      }
+
       const videoMetadataMatch = /^\/api\/v1\/videos\/i\/([^/]+)\/metadata$/.exec(path);
       if (method === 'GET' && videoMetadataMatch) {
         const video = state.videos.get(decodeURIComponent(videoMetadataMatch[1]));

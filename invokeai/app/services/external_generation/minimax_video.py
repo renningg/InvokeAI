@@ -13,6 +13,7 @@ from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import BoundedSemaphore
 from typing import Any, Literal, get_args
 from urllib.parse import urlsplit
 
@@ -51,7 +52,16 @@ _DOWNLOAD_TIMEOUT = 5 * 60
 MAX_VIDEO_BYTES = 256 * 1024 * 1024
 _MAX_IMAGE_BYTES = 30_000_000
 _MAX_REFERENCE_VIDEO_BYTES = 50_000_000
-_REFERENCE_DECODER_LIMITS = ("-threads", "1", "-max_pixels", str(5760 * 5760))
+_REFERENCE_PROBE_SLOTS = BoundedSemaphore(2)
+_MIN_MEDIA_SIDE = 256
+_MAX_MEDIA_SIDE = 5760
+_MIN_MEDIA_RATIO = 0.4
+_MAX_MEDIA_RATIO = 2.5
+_MEDIA_DIMENSIONS_ERROR = (
+    f"MiniMax images and reference videos must be {_MIN_MEDIA_SIDE}–{_MAX_MEDIA_SIDE} pixels per side "
+    f"with an aspect ratio of {_MIN_MEDIA_RATIO}–{_MAX_MEDIA_RATIO}."
+)
+_REFERENCE_DECODER_LIMITS = ("-threads", "1", "-max_pixels", str(_MAX_MEDIA_SIDE**2))
 _REFERENCE_TRACKS = ("-map", "0:V:0", "-map", "0:a:0?")
 _MAX_REQUEST_BYTES = 64_000_000
 
@@ -159,10 +169,12 @@ class MiniMaxVideoRequest:
 
 
 def validate_minimax_media_dimensions(width: int, height: int) -> None:
-    if not (256 <= width <= 5760 and 256 <= height <= 5760 and 0.4 <= width / height <= 2.5):
-        raise ValueError(
-            "MiniMax images and reference videos must be 256–5760 pixels per side with an aspect ratio of 0.4–2.5."
-        )
+    if not (
+        _MIN_MEDIA_SIDE <= width <= _MAX_MEDIA_SIDE
+        and _MIN_MEDIA_SIDE <= height <= _MAX_MEDIA_SIDE
+        and _MIN_MEDIA_RATIO <= width / height <= _MAX_MEDIA_RATIO
+    ):
+        raise ValueError(_MEDIA_DIMENSIONS_ERROR)
 
 
 def _encode_image(image: Image, remaining: int) -> str:
@@ -179,6 +191,98 @@ def _encode_image(image: Image, remaining: int) -> str:
         return base64.b64encode(png.getbuffer()).decode("ascii")
 
 
+@dataclass(frozen=True)
+class VideoReferenceInfo:
+    """Size of the MP4 itself and precise timing. Empty and oversized files have no timing."""
+
+    file_size_bytes: int
+    fps: float | None
+    duration: float | None
+
+
+def get_minimax_reference_info(src: Path, is_canceled: Callable[[], bool]) -> VideoReferenceInfo:
+    size = src.stat().st_size
+    if not 0 < size <= _MAX_REFERENCE_VIDEO_BYTES:
+        return VideoReferenceInfo(size, None, None)
+    # Timings after stream copy can differ from the source headers for fragmented movies,
+    # edit lists and nonzero timestamps. Inspect the same representation that submission sends.
+    if not _REFERENCE_PROBE_SLOTS.acquire(blocking=False):
+        raise TimeoutError("Video inspection is busy. Try again.")
+    try:
+        with TemporaryDirectory(prefix="invokeai-minimax-reference-") as directory:
+            clip = Path(directory) / "reference.mp4"
+            _remux_reference_video(src, clip, is_canceled)
+            fps = read_mp4_video_frame_rate(clip)
+            duration = read_mp4_movie_duration(clip)
+    finally:
+        _REFERENCE_PROBE_SLOTS.release()
+    if fps is None or not duration:
+        raise ValueError("Could not read the reference video's frame rate and duration.")
+    return VideoReferenceInfo(size, fps, duration)
+
+
+def _remux_reference_video(src: Path, clip: Path, is_canceled: Callable[[], bool]) -> int:
+    # Force the local MOV/MP4 demuxer. Never auto-detect playlists or follow external data references.
+    source = ["-protocol_whitelist", "file", "-f", "mov", "-enable_drefs", "0", "-i", str(src)]
+    # A header-only output detects a second playable video or soundtrack, even if it has
+    # a different default disposition. Attached cover art is excluded by the V selector.
+    layout = [
+        *_REFERENCE_TRACKS,
+        "-map",
+        "0:V:1?",
+        "-map",
+        "0:a:1?",
+        "-c",
+        "copy",
+        "-frames:v",
+        "0",
+        "-frames:a",
+        "0",
+        "-f",
+        "framecrc",
+        "pipe:1",
+    ]
+    proc = run_ffmpeg_process(
+        [
+            "-xerror",
+            *_REFERENCE_DECODER_LIMITS,
+            *source,
+            *layout,
+            *_REFERENCE_TRACKS,
+            "-c",
+            "copy",
+            "-map_metadata",
+            "-1",
+            "-map_metadata:s",
+            "-1",
+            "-map_chapters",
+            "-1",
+            "-write_tmcd",
+            "0",
+            # Keep the presentation timeline (edits and audio tail included) precise at 2s/15s.
+            # The default movie clock rounds each track up to milliseconds. Use FFmpeg's maximum
+            # supported timescale so an input track tick below a whole-second cutoff stays below it.
+            "-movie_timescale",
+            str(2**31 - 1),
+            "-fs",
+            str(_MAX_REFERENCE_VIDEO_BYTES + 1),
+            str(clip),
+        ],
+        timeout=60,
+        is_canceled=is_canceled,
+        capture_stdout=True,
+    )
+    track_types = re.findall(rb"^#media_type \d+: (video|audio)\r?$", proc.stdout, re.MULTILINE)
+    if track_types.count(b"video") > 1 or track_types.count(b"audio") > 1:
+        raise ValueError("Export a reference clip with one video track and at most one audio track.")
+    if proc.returncode != 0 or track_types.count(b"video") != 1:
+        raise ValueError("The Gallery reference must be a readable MP4 or MOV video.")
+    size = clip.stat().st_size
+    if not 0 < size <= _MAX_REFERENCE_VIDEO_BYTES:
+        raise ValueError("The prepared MiniMax reference video exceeds 50 MB or is empty.")
+    return size
+
+
 def _encode_reference_video(src: Path, remaining: int, is_canceled: Callable[[], bool]) -> str:
     """Prepare the authorized Gallery file for disclosure without forwarding its container metadata."""
     try:
@@ -187,59 +291,7 @@ def _encode_reference_video(src: Path, remaining: int, is_canceled: Callable[[],
             raise ValueError("A MiniMax reference video must be nonempty and at most 50 MB.")
         with TemporaryDirectory(prefix="invokeai-minimax-reference-") as directory:
             clip = Path(directory) / "reference.mp4"
-            # Force the local MOV/MP4 demuxer. Never auto-detect playlists or follow external data references.
-            source = ["-protocol_whitelist", "file", "-f", "mov", "-enable_drefs", "0", "-i", str(src)]
-            # A header-only output detects a second playable video or soundtrack, even if it has
-            # a different default disposition. Attached cover art is excluded by the V selector.
-            layout = [
-                *_REFERENCE_TRACKS,
-                "-map",
-                "0:V:1?",
-                "-map",
-                "0:a:1?",
-                "-c",
-                "copy",
-                "-frames:v",
-                "0",
-                "-frames:a",
-                "0",
-                "-f",
-                "framecrc",
-                "pipe:1",
-            ]
-            proc = run_ffmpeg_process(
-                [
-                    "-xerror",
-                    *_REFERENCE_DECODER_LIMITS,
-                    *source,
-                    *layout,
-                    *_REFERENCE_TRACKS,
-                    "-c",
-                    "copy",
-                    "-map_metadata",
-                    "-1",
-                    "-map_metadata:s",
-                    "-1",
-                    "-map_chapters",
-                    "-1",
-                    "-write_tmcd",
-                    "0",
-                    "-fs",
-                    str(_MAX_REFERENCE_VIDEO_BYTES + 1),
-                    str(clip),
-                ],
-                timeout=60,
-                is_canceled=is_canceled,
-                capture_stdout=True,
-            )
-            track_types = re.findall(rb"^#media_type \d+: (video|audio)\r?$", proc.stdout, re.MULTILINE)
-            if track_types.count(b"video") > 1 or track_types.count(b"audio") > 1:
-                raise ValueError("Export a reference clip with one video track and at most one audio track.")
-            if proc.returncode != 0 or track_types.count(b"video") != 1:
-                raise ValueError("The Gallery reference must be a readable MP4 or MOV video.")
-            size = clip.stat().st_size
-            if not 0 < size <= _MAX_REFERENCE_VIDEO_BYTES:
-                raise ValueError("The prepared MiniMax reference video exceeds 50 MB or is empty.")
+            size = _remux_reference_video(src, clip, is_canceled)
             if 4 * ((size + 2) // 3) > remaining:
                 raise ValueError("The MiniMax request exceeds 64 MB with the encoded reference media.")
             duration = read_mp4_movie_duration(clip)
@@ -256,38 +308,40 @@ def _encode_reference_video(src: Path, remaining: int, is_canceled: Callable[[],
 
 
 def _validate_reference_streams(clip: Path, is_canceled: Callable[[], bool]) -> None:
-    # The bundled FFmpeg has no ffprobe. framecrc reports decoded dimensions without emitting
-    # raw pixels; a video packet proves the stream contains a decodable frame.
+    # FFmpeg reconfigures the crop filter when decoded dimensions change. Keep valid frames
+    # whole (a zero-copy crop); zero width makes the named filter reject any out-of-bounds frame.
+    allowed = (
+        f"between(iw,{_MIN_MEDIA_SIDE},{_MAX_MEDIA_SIDE})*between(ih,{_MIN_MEDIA_SIDE},{_MAX_MEDIA_SIDE})"
+        f"*between(iw/ih,{_MIN_MEDIA_RATIO},{_MAX_MEDIA_RATIO})"
+    )
     proc = run_ffmpeg_process(
         [
             "-xerror",
+            "-abort_on",
+            "empty_output_stream",
             *_REFERENCE_DECODER_LIMITS,
             "-codec_whitelist",
             "h264,hevc,aac,mp3,mp3float",
+            "-noautorotate",
             "-i",
             str(clip),
             *_REFERENCE_TRACKS,
-            "-frames:v",
-            "1",
-            "-c:v",
-            "wrapped_avframe",
-            "-af",
-            "atrim=end_sample=1",
-            "-c:a",
-            "pcm_s16le",
+            "-vf",
+            f"crop@reference_dimensions=w='if({allowed},iw,0)':h=ih:exact=1",
+            "-noautoscale",
+            "-fps_mode",
+            "passthrough",
             "-f",
-            "framecrc",
-            "pipe:1",
+            "null",
+            "-",
         ],
-        timeout=30,
+        timeout=60,
         is_canceled=is_canceled,
-        capture_stdout=True,
     )
-    dimensions = re.search(rb"^#dimensions 0: (\d+)x(\d+)\r?$", proc.stdout, re.MULTILINE)
-    if proc.returncode or dimensions is None or not re.search(rb"^0,", proc.stdout, re.MULTILINE):
+    if proc.returncode:
+        if b"crop@reference_dimensions" in proc.stderr:
+            raise ValueError(_MEDIA_DIMENSIONS_ERROR)
         raise ValueError("MiniMax requires a decodable H.264 or HEVC video with optional AAC or MP3 audio.")
-    width, height = map(int, dimensions.groups())
-    validate_minimax_media_dimensions(width, height)
 
 
 def _check_canceled(is_canceled: Callable[[], bool]) -> None:

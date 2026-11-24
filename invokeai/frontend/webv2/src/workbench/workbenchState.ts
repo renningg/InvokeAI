@@ -436,6 +436,7 @@ type WorkbenchReducerAction =
   | { type: 'redoWorkflowChange'; projectId?: string; workflowId?: string }
   | ({
       type: 'submitResolvedInvocationSnapshot';
+      checkedHostedReferenceName?: string;
       expectedMiniMaxRegion?: ResolvedInvocationRoute['expectedMiniMaxRegion'];
       runtime: InvocationRuntimeInputs;
       backendSupportsCancellation: boolean;
@@ -5508,7 +5509,8 @@ const reduceWorkbenchAction = (
           : undefined;
 
       if (target && action.route.sourceId === 'video') {
-        const hosted = getWidgetValues(target, 'video').hostedH3;
+        const raw = getWidgetValues(target, 'video');
+        const hosted = raw.hostedH3;
         const regionAtEnqueue = hosted ? action.runtime.miniMaxStatus?.region : undefined;
         if ((hosted && !regionAtEnqueue) || action.expectedMiniMaxRegion !== regionAtEnqueue) {
           return addNotification(
@@ -5519,6 +5521,21 @@ const reduceWorkbenchAction = (
               projectId: target.id,
               title: 'The MiniMax service or region changed. Check the Video panel and invoke again.',
               titleKey: 'widgets.video.hosted.regionChanged',
+            })
+          );
+        }
+        const values = hosted ? normalizeVideoWidgetValues(raw) : null;
+        const currentReferenceName =
+          values?.hostedH3?.input === 'references' ? values.hostedReferenceVideo?.video_name : undefined;
+        if (currentReferenceName !== action.checkedHostedReferenceName) {
+          return addNotification(
+            state,
+            createNotification({
+              category: 'enqueue',
+              kind: 'error',
+              projectId: target.id,
+              title: 'The MiniMax reference video changed. Check the Video panel and invoke again.',
+              titleKey: 'widgets.video.hosted.referenceChanged',
             })
           );
         }

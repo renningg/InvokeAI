@@ -1,10 +1,12 @@
 import type { MainModelConfig } from '@features/generation/contracts';
+import type * as Http from '@platform/transport/http';
 import type { InvocationRoute } from '@workbench/invocationContracts';
 
 import { dynamicPromptsKeys } from '@features/generation/prompts';
 import { getDefaultGenerateSettings } from '@features/generation/settings';
 import { seedArchitectureCapabilities } from '@features/models/core/architectureCapabilities.testing';
 import { createDefaultUpscaleWidgetValues } from '@features/upscale';
+import { beginReferenceSelection } from '@features/video';
 import { queryClient } from '@platform/query/client';
 import { captureAccountScope } from '@platform/state/accountLifecycle';
 import { ApiError } from '@platform/transport/http';
@@ -36,6 +38,16 @@ vi.mock('@features/gallery/queries', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   ensureGalleryBoardDestinations: galleryQueriesMock.ensureGalleryBoardDestinations,
 }));
+
+const referenceInfo = vi.hoisted(() => vi.fn());
+vi.mock('@platform/transport/http', async (importOriginal) => {
+  const original = await importOriginal<typeof Http>();
+  return {
+    ...original,
+    apiFetchJson: (path: string, options?: RequestInit) =>
+      path.endsWith('/reference-info') ? referenceInfo(path, options) : original.apiFetchJson(path, options),
+  };
+});
 
 // Holds an expansion open so a test can edit the project while it is pending; otherwise the real resolver runs.
 const expansionMock = vi.hoisted(() => ({ pending: null as Promise<unknown> | null }));
@@ -590,6 +602,80 @@ describe('submitResolvedInvocation for Video', () => {
     type: 'main',
     variant: 't2v_a14b',
   } as const;
+
+  it('checks saved Gallery references at submission, including when another pick is pending', async () => {
+    const store = createWorkbenchStore();
+    const { commands } = store;
+    commands.widgets.patchValues('video', {
+      positivePrompt: 'Follow the movement',
+      hostedH3: {
+        model: 'MiniMax-H3',
+        input: 'references',
+        resolution: '768P',
+        duration: 5,
+        ratio: '16:9',
+        generateAudio: true,
+      },
+      hostedReferenceVideo: { video_name: 'old clip.mp4', width: 1280, height: 720, durationSeconds: 4, fps: 23.97 },
+    });
+    const project = store.getSnapshot().activeProject;
+    const owner = captureAccountScope();
+    const route = resolveInvocationRoute(
+      project,
+      'global',
+      {
+        destination: 'gallery',
+        destinationLocked: false,
+        sourceId: 'video',
+        sourceLocked: false,
+      },
+      [],
+      undefined,
+      undefined,
+      { configured: true, region: 'global' }
+    );
+    const submit = () =>
+      submitResolvedInvocation({
+        commands,
+        formatCanvasInvocationFailure,
+        formatUpscaleMetadataFailure,
+        models: [],
+        owner,
+        prepareCanvasInvocation: vi.fn(),
+        project,
+        route,
+        scopedDefaults: {},
+      });
+    const dispatch = vi.spyOn(commands.generation, 'submitResolved');
+    const notify = vi.spyOn(commands.notifications, 'add');
+    const pick = beginReferenceSelection(owner, project.id, 'replacement.mp4');
+    try {
+      await submit();
+      expect(referenceInfo).not.toHaveBeenCalled();
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(notify).toHaveBeenLastCalledWith(
+        expect.objectContaining({ titleKey: 'widgets.video.hosted.referenceChecking' })
+      );
+    } finally {
+      pick.finish();
+    }
+    referenceInfo.mockResolvedValueOnce({ file_size_bytes: 50_000_001, duration: null, fps: null });
+    await submit();
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(notify).toHaveBeenLastCalledWith(expect.objectContaining({ message: expect.stringContaining('50 MB') }));
+    referenceInfo.mockResolvedValueOnce({ file_size_bytes: 150, duration: 4, fps: 23.975 });
+    await submit();
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(notify).toHaveBeenLastCalledWith(expect.objectContaining({ message: expect.stringContaining('23.976') }));
+    referenceInfo.mockResolvedValueOnce({ file_size_bytes: 50_000_000, duration: 4, fps: 23.976 });
+    await submit();
+    expect(referenceInfo).toHaveBeenLastCalledWith('/api/v1/videos/i/old%20clip.mp4/reference-info', {
+      signal: owner.signal,
+    });
+    expect(dispatch).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ checkedHostedReferenceName: 'old clip.mp4' })
+    );
+  });
 
   const submitVideo = async (dynamicPromptsEnabled: boolean) => {
     let state = workbenchReducer(createInitialWorkbenchState(), {

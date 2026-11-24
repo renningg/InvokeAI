@@ -131,5 +131,8 @@ export {
   useVideoUiActions,
   type VideoSpanPlaybackPort,
   type VideoSpanPlaybackState,
+  beginReferenceSelection,
+  cancelReferenceSelection,
+  hasPendingReferenceSelection,
   type VideoUiAdapter,
 } from './ui/VideoUiContext';

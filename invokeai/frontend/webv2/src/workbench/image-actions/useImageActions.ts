@@ -89,6 +89,7 @@ import { recordCanvasImportError } from './canvasImportError';
 import { executeImageRecall, executeLoadMediaWorkflow, getCurrentGenerateValues } from './executeImageRecall';
 import {
   appendReferenceVideo,
+  prepareReferenceVideoPlacement,
   executeVideoRecall,
   getVideoPlacementRoom,
   placeConditioningClip,
@@ -142,7 +143,7 @@ export interface ImageActions extends GalleryItemActions {
   setImagesStarred: (imageNames: string[], starred: boolean) => Promise<void>;
   useAsReferenceImage: (image: GalleryImage) => void;
   sendImageToVideo: (image: GalleryImage) => void;
-  useAsReferenceVideo: (item: GalleryVideoItem) => void;
+  useAsReferenceVideo: (item: GalleryVideoItem) => Promise<void>;
   /** Clears the media the clip excludes. */
   useAsConditioningClip: (item: GalleryVideoItem, role: VideoConditioningRole) => void;
 }
@@ -1477,8 +1478,23 @@ export const useImageActions = ({
         commands.widgets.patchValues('video', patch, projectId);
         generation.setSource('video');
       },
-      useAsReferenceVideo: (item) => {
-        const placement = appendReferenceVideo({ models, video: item, videoValues: getLatestVideoValues() });
+      useAsReferenceVideo: async (item) => {
+        const videoValues = getLatestVideoValues();
+        const targetProjectId = projectId ?? queries.getSnapshot().activeProject.id;
+        const placement = videoValues.hostedH3
+          ? await prepareReferenceVideoPlacement({
+              models,
+              video: item,
+              videoValues,
+              readValues: getLatestVideoValues,
+              owner: captureAccountScope(),
+              projectId: targetProjectId,
+              isCurrent: () => queries.isActiveProject(targetProjectId),
+            })
+          : appendReferenceVideo({ models, video: item, videoValues });
+        if (!placement) {
+          return;
+        }
 
         // A race can still fill the last slot first.
         if (placement.status !== 'appended') {
@@ -1497,7 +1513,7 @@ export const useImageActions = ({
           return;
         }
 
-        commands.widgets.patchValues('video', placement.patch, projectId);
+        commands.widgets.patchValues('video', placement.patch, targetProjectId);
         openWorkbenchWidget('video', { preferredRegions: ['left'] });
       },
       useAsConditioningClip: (item, role) => {

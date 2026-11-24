@@ -1,24 +1,29 @@
 import type * as GallerySlots from '@features/gallery/mediaSlot';
 import type { ModelConfig } from '@features/models';
 import type { VideoWidgetValues } from '@features/video';
+import type * as Http from '@platform/transport/http';
 import type { Project } from '@workbench/projectContracts';
 import type { WorkbenchInternalStore } from '@workbench/workbenchStore';
 import type { ComponentProps } from 'react';
 
 import { ChakraProvider } from '@chakra-ui/react';
-import { DndContext } from '@dnd-kit/core';
+import { DndContext, type DragEndEvent } from '@dnd-kit/core';
 import { GalleryHostProvider, type GalleryHost } from '@features/gallery/picker';
+import { GalleryDragScope } from '@features/gallery/ui/galleryDnd';
 import { GenerationUiProvider, type GenerationUiAdapter } from '@features/generation/ui/GenerationUiContext';
 import { seedArchitectureCapabilities } from '@features/models/core/architectureCapabilities.testing';
 import { setModelsSnapshotForTests } from '@features/models/data/modelsStore';
 import { getDefaultVideoSettings, normalizeVideoWidgetValues } from '@features/video';
 import { VideoWidgetView } from '@features/video/ui/VideoWidgetView';
+import { captureAccountScope } from '@platform/state/accountLifecycle';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { system } from '@theme/system';
+import { resolveInvocationRoute } from '@workbench/invocation';
+import { submitResolvedInvocation } from '@workbench/invocationSubmit';
 import { getProjectWidgetValues, getResolvedProjectWidgetValues } from '@workbench/widgetState';
 import { createWorkbenchStore } from '@workbench/workbenchStore';
 import i18next from 'i18next';
-import { act, useSyncExternalStore } from 'react';
+import { act, Activity, useLayoutEffect, useSyncExternalStore } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -141,8 +146,33 @@ vi.mock('@features/models/react', async (importOriginal) => ({
     );
   },
 }));
+const dragEnds = vi.hoisted(() => new Set<(event: DragEndEvent) => void>());
+vi.mock('@dnd-kit/core', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  useDndMonitor: ({ onDragEnd }: { onDragEnd?: (event: DragEndEvent) => void }) => {
+    useLayoutEffect(() => {
+      if (onDragEnd) {
+        dragEnds.add(onDragEnd);
+        return () => {
+          dragEnds.delete(onDragEnd);
+        };
+      }
+    }, [onDragEnd]);
+  },
+}));
+const resolveVideo = vi.hoisted(() => vi.fn());
+const referenceInfo = vi.hoisted(() => vi.fn());
+vi.mock('@platform/transport/http', async (importOriginal) => {
+  const original = await importOriginal<typeof Http>();
+  return {
+    ...original,
+    apiFetchJson: (path: string, options?: RequestInit) =>
+      path.endsWith('/reference-info') ? referenceInfo(path, options) : original.apiFetchJson(path, options),
+  };
+});
 vi.mock('@features/gallery/data/backend', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
+  getGalleryItemByRef: resolveVideo,
   listGalleryBoards: () => Promise.resolve([{ id: 'none', kind: 'uncategorized', name: '', videoCount: 2 }]),
   listGalleryDateBoards: () => Promise.resolve([]),
   listGalleryItems: () =>
@@ -178,7 +208,9 @@ vi.mock('@features/gallery/mediaSlot', async (importOriginal) => {
     GalleryMediaSlot: (props: ComponentProps<typeof original.GalleryMediaSlot>) =>
       props.dropId.startsWith('hosted-h3-') ? (
         <GalleryHostProvider host={host}>
-          <original.GalleryMediaSlot {...props} />
+          <GalleryDragScope value={props.dropId === 'hosted-h3-reference-video'}>
+            <original.GalleryMediaSlot {...props} />
+          </GalleryDragScope>
         </GalleryHostProvider>
       ) : null,
   };
@@ -238,6 +270,7 @@ const LAST_FRAME = { height: 704, image_name: 'dusk.png', width: 1248 };
 let store: WorkbenchInternalStore;
 let host: HTMLDivElement;
 let root: Root;
+let viewQueryClient: QueryClient;
 
 const stored = () => getProjectWidgetValues(store.getSnapshot().activeProject, 'video') as unknown as VideoWidgetValues;
 const modelSelect = () => host.querySelector<HTMLSelectElement>('select[aria-label="Select a video model…"]')!;
@@ -262,15 +295,21 @@ const render = async () => {
     sourceVideo: SOURCE_VIDEO,
     steps: 37,
   });
+  await renderView();
+};
+
+const renderView = async (hidden = false) => {
   await act(() =>
     root.render(
       <I18nextProvider i18n={i18n}>
-        <QueryClientProvider client={new QueryClient()}>
+        <QueryClientProvider client={viewQueryClient}>
           <ChakraProvider value={system}>
             <GenerationUiProvider adapter={generationAdapter}>
               <VideoUiAdapterProvider>
                 <DndContext>
-                  <VideoWidgetView />
+                  <Activity mode={hidden ? 'hidden' : 'visible'}>
+                    <VideoWidgetView />
+                  </Activity>
                 </DndContext>
               </VideoUiAdapterProvider>
             </GenerationUiProvider>
@@ -301,7 +340,10 @@ beforeEach(() => {
   host = document.createElement('div');
   document.body.append(host);
   root = createRoot(host);
+  viewQueryClient = new QueryClient();
   notify.mockClear();
+  resolveVideo.mockReset();
+  referenceInfo.mockReset().mockResolvedValue({ file_size_bytes: 50_000_000, duration: 4, fps: 23.976 });
   pickerIds.length = 0;
 });
 
@@ -353,13 +395,14 @@ describe('video model switch confirmation', () => {
       expect(document.querySelector('[role="dialog"] input[type="file"]')).toBeNull();
     };
     await open(/Choose Reference video/);
+    expect(referenceInfo).not.toHaveBeenCalled();
     await act(() => userEvent.keyboard('{Enter}'));
     await expect.element(page.getByRole('button', { name: 'Replace Reference video (coast.mp4)' })).toHaveFocus();
     expect(stored().hostedReferenceVideo).toEqual({
       video_name: 'coast.mp4',
       width: 1280,
       height: 720,
-      fps: 24,
+      fps: 23.976,
       durationSeconds: 4,
     });
     await act(() => userEvent.click(page.getByRole('button', { name: /Choose Reference image 1/ })));
@@ -369,8 +412,18 @@ describe('video model switch confirmation', () => {
     expect(stored()).toMatchObject({ sourceVideo: SOURCE_VIDEO, lastFrameImage: LAST_FRAME, references: [] });
     await change('Generation service', 'minimax');
     await change('Input mode', 'references');
+    referenceInfo.mockResolvedValueOnce({ file_size_bytes: 50_000_001, duration: null, fps: null });
     await open(/Replace Reference video/);
-    await act(() => userEvent.keyboard('{ArrowRight}{Enter}'));
+    await act(() => userEvent.click(page.getByRole('option', { name: /river.mp4/ })));
+    await vi.waitFor(() => expect(store.getSnapshot().notifications.at(0)?.title).toMatch(/50 MB/));
+    expect(stored().hostedReferenceVideo?.video_name).toBe('coast.mp4');
+    referenceInfo.mockResolvedValueOnce({ file_size_bytes: 300, duration: 4, fps: 23.975 });
+    await open(/Replace Reference video/);
+    await act(() => userEvent.click(page.getByRole('option', { name: /river.mp4/ })));
+    await vi.waitFor(() => expect(store.getSnapshot().notifications.at(0)?.title).toMatch(/23.976/));
+    expect(stored().hostedReferenceVideo?.video_name).toBe('coast.mp4');
+    await open(/Replace Reference video/);
+    await act(() => userEvent.click(page.getByRole('option', { name: /river.mp4/ })));
     await expect.element(page.getByRole('button', { name: 'Replace Reference video (river.mp4)' })).toHaveFocus();
     const remove = page.getByRole('button', { name: 'Remove Reference video' });
     (remove.element() as HTMLButtonElement).focus();
@@ -378,6 +431,120 @@ describe('video model switch confirmation', () => {
     await expect.element(page.getByRole('button', { name: /Choose Reference video/ })).toHaveFocus();
     expect(stored().hostedReferenceVideo).toBeNull();
     expect(stored().sourceVideo).toEqual(SOURCE_VIDEO);
+  });
+
+  it('blocks Invoke during drop resolution, finishes a hidden choice, and aborts superseded drops and probes', async () => {
+    await render();
+    const previous = { video_name: 'a.mp4', width: 1280, height: 720, durationSeconds: 4, fps: 24 };
+    await act(() =>
+      store.commands.widgets.patchValues('video', {
+        hostedH3: {
+          model: 'MiniMax-H3',
+          input: 'references',
+          resolution: '768P',
+          duration: 5,
+          ratio: '16:9',
+          generateAudio: true,
+        },
+        hostedReferenceVideo: previous,
+      })
+    );
+    const drop = async (name: string) => {
+      const event = {
+        active: { data: { current: { kind: 'gallery-item', items: [{ kind: 'video', name }] } } },
+        over: { id: 'hosted-h3-reference-video' },
+      } as unknown as DragEndEvent;
+      await act(() => {
+        for (const listener of dragEnds) {
+          listener(event);
+        }
+      });
+    };
+    const dto = (name: string) => ({ name, kind: 'video', width: 1280, height: 720, durationSeconds: 4, fps: 24 });
+    const project = store.getSnapshot().activeProject;
+    const enqueue = vi.spyOn(store.commands.generation, 'submitResolved');
+    const invoke = () =>
+      submitResolvedInvocation({
+        commands: store.commands,
+        project,
+        route: resolveInvocationRoute(
+          project,
+          'global',
+          { sourceId: 'video', destination: 'gallery', sourceLocked: false, destinationLocked: false },
+          [],
+          undefined,
+          undefined,
+          { configured: true, region: 'global' }
+        ),
+        owner: captureAccountScope(),
+        models: [],
+        scopedDefaults: {},
+        formatCanvasInvocationFailure: vi.fn(),
+        formatUpscaleMetadataFailure: vi.fn(),
+        prepareCanvasInvocation: vi.fn(),
+      });
+    const deferred = <T,>() => {
+      let resolve!: (value: T) => void;
+      const promise = new Promise<T>((settle) => {
+        resolve = settle;
+      });
+      return { promise, resolve };
+    };
+    const b = deferred<ReturnType<typeof dto>>();
+    resolveVideo.mockReturnValueOnce(b.promise);
+    await expect.element(page.getByRole('button', { name: /Replace Reference video/ })).toBeVisible();
+    await drop('b.mp4');
+    expect(resolveVideo).toHaveBeenCalledExactlyOnceWith({ kind: 'video', name: 'b.mp4' }, expect.any(AbortSignal));
+    await act(invoke);
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(referenceInfo).not.toHaveBeenCalled();
+    await renderView(true);
+    await act(invoke);
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(store.getSnapshot().notifications.at(0)?.titleKey).toBe('widgets.video.hosted.referenceChecking');
+    await act(() => b.resolve(dto('b.mp4')));
+    await vi.waitFor(() => expect(stored().hostedReferenceVideo?.video_name).toBe('b.mp4'));
+    await renderView();
+    await expect.element(page.getByRole('button', { name: /Replace Reference video \(b.mp4\)/ })).toBeVisible();
+    expect(page.getByText('Checking b.mp4…').query()).toBeNull();
+    const c = deferred<ReturnType<typeof dto>>();
+    resolveVideo.mockReturnValueOnce(c.promise);
+    await drop('c.mp4');
+    const waitingForDto = resolveVideo.mock.lastCall![1] as AbortSignal;
+    const d = deferred<{ file_size_bytes: number; duration: number; fps: number }>();
+    resolveVideo.mockResolvedValueOnce(dto('d.mp4'));
+    referenceInfo.mockReturnValueOnce(d.promise);
+    await drop('d.mp4');
+    expect(waitingForDto.aborted).toBe(true);
+    await vi.waitFor(() =>
+      expect(referenceInfo).toHaveBeenLastCalledWith('/api/v1/videos/i/d.mp4/reference-info', expect.anything())
+    );
+    const waitingForInfo = referenceInfo.mock.lastCall![1].signal as AbortSignal;
+    resolveVideo.mockResolvedValueOnce(dto('e.mp4'));
+    await drop('e.mp4');
+    expect(waitingForInfo.aborted).toBe(true);
+    await act(() => {
+      c.resolve(dto('c.mp4'));
+      d.resolve({ file_size_bytes: 10, duration: 4, fps: 24 });
+    });
+    await vi.waitFor(() => expect(stored().hostedReferenceVideo?.video_name).toBe('e.mp4'));
+    expect(referenceInfo.mock.calls.map(([path]) => path)).not.toContain('/api/v1/videos/i/c.mp4/reference-info');
+    const cancelled = deferred<ReturnType<typeof dto>>();
+    resolveVideo.mockReturnValueOnce(cancelled.promise);
+    await drop('cancelled.mp4');
+    const cancelledSignal = resolveVideo.mock.lastCall![1] as AbortSignal;
+    await act(() => userEvent.click(page.getByRole('button', { name: 'Cancel', exact: true })));
+    expect(cancelledSignal.aborted).toBe(true);
+    await act(() => cancelled.resolve(dto('cancelled.mp4')));
+    expect(stored().hostedReferenceVideo?.video_name).toBe('e.mp4');
+    const closing = deferred<ReturnType<typeof dto>>();
+    resolveVideo.mockReturnValueOnce(closing.promise);
+    await drop('closing.mp4');
+    const closingSignal = resolveVideo.mock.lastCall![1] as AbortSignal;
+    await act(() => root.render(null));
+    expect(closingSignal.aborted).toBe(true);
+    await act(() => closing.resolve(dto('closing.mp4')));
+    expect(stored().hostedReferenceVideo?.video_name).toBe('e.mp4');
   });
 
   it('starts MiniMax without the images selected for a local reference model', async () => {

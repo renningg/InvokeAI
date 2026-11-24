@@ -481,6 +481,72 @@ describe('canvas destinations', () => {
     width: 512,
   });
 
+  it('inspects the selected Gallery clip before switching the hosted panel to references', async () => {
+    const project = makeMockProject('project-1');
+    const videoProject = {
+      ...project,
+      widgetInstances: {
+        ...project.widgetInstances,
+        video: {
+          ...project.widgetInstances.gallery,
+          id: 'video',
+          typeId: 'video',
+          state: {
+            id: 'video',
+            values: { hostedH3: { model: 'MiniMax-H3', input: 'text' } },
+          },
+        },
+      },
+    };
+    mocks.getSnapshot.mockReturnValue({ activeProject: videoProject, projects: [videoProject], scopedDefaults: {} });
+    const request = vi.fn();
+    vi.stubGlobal('fetch', request);
+    onTestFinished(() => {
+      vi.unstubAllGlobals();
+    });
+    const clip = {
+      name: 'reference clip.mp4',
+      kind: 'video' as const,
+      width: 1280,
+      height: 720,
+      durationSeconds: 4,
+      fps: 23.98,
+      fullUrl: '/clip',
+      thumbnailUrl: '/thumb',
+      boardId: 'none',
+      category: 'general' as const,
+      createdAt: '2026-01-01T00:00:00Z',
+      starred: false,
+      isIntermediate: false,
+    };
+    const choose = () => act(() => actionsRef.current!.useAsReferenceVideo(clip));
+    request.mockResolvedValueOnce(Response.json({ file_size_bytes: 50_000_001, duration: null, fps: null }));
+    await choose();
+    expect(mocks.galleryWidgetsPatchValues).not.toHaveBeenCalled();
+    expect(mocks.notificationsAdd).toHaveBeenLastCalledWith(
+      expect.objectContaining({ message: expect.stringMatching(/50 MB/) })
+    );
+    request.mockResolvedValueOnce(Response.json({ file_size_bytes: 100, duration: 4, fps: 23.975 }));
+    await choose();
+    expect(mocks.galleryWidgetsPatchValues).not.toHaveBeenCalled();
+    expect(mocks.notificationsAdd).toHaveBeenLastCalledWith(
+      expect.objectContaining({ message: expect.stringMatching(/23.976/) })
+    );
+    request.mockResolvedValueOnce(Response.json({ detail: 'Video not found' }, { status: 404 }));
+    await choose();
+    expect(mocks.galleryWidgetsPatchValues).not.toHaveBeenCalled();
+    expect(mocks.notificationsAdd).toHaveBeenLastCalledWith(expect.objectContaining({ message: 'Video not found' }));
+    request.mockResolvedValueOnce(Response.json({ file_size_bytes: 50_000_000, duration: 4, fps: 23.976 }));
+    await choose();
+    expect(mocks.galleryWidgetsPatchValues).toHaveBeenCalledExactlyOnceWith(
+      'video',
+      expect.objectContaining({
+        hostedReferenceVideo: expect.objectContaining({ video_name: clip.name, fps: 23.976, durationSeconds: 4 }),
+      }),
+      'project-1'
+    );
+  });
+
   it('adds a Gallery image beside a hosted clip without changing the local conditioning clip', () => {
     const project = makeMockProject('project-1');
     const values = {

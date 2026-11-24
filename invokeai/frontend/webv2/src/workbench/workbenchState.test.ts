@@ -2549,11 +2549,17 @@ describe('workbenchReducer Phase 5 generation flow', () => {
           },
         },
       });
-      const submit = (configured: boolean, region: 'cn' | 'global' | null, expectedMiniMaxRegion?: 'cn' | 'global') =>
+      const submit = (
+        configured: boolean,
+        region: 'cn' | 'global' | null,
+        expectedMiniMaxRegion?: 'cn' | 'global',
+        checkedHostedReferenceName?: string
+      ) =>
         getActiveProject(
           workbenchReducer(state, {
             backendSupportsCancellation: true,
             expectedMiniMaxRegion,
+            checkedHostedReferenceName,
             models: [],
             projectId: state.activeProjectId,
             route: { destination: 'gallery', destinationLocked: false, sourceId: 'video', sourceLocked: false },
@@ -2618,7 +2624,9 @@ describe('workbenchReducer Phase 5 generation flow', () => {
           hostedReferenceVideo: { video_name: 'movement.mp4', width: 1024, height: 768, durationSeconds: 5 },
         },
       });
-      const [referenceRun] = submit(true, 'global', 'global');
+      expect(submit(true, 'global', 'global')).toHaveLength(0);
+      expect(submit(true, 'global', 'global', 'replaced.mp4')).toHaveLength(0);
+      const [referenceRun] = submit(true, 'global', 'global', 'movement.mp4');
       expect(referenceRun?.snapshot.backendSubmission).toMatchObject({
         graph: { nodes: { video_output: { reference_video: { video_name: 'movement.mp4' }, reference_images: [] } } },
       });

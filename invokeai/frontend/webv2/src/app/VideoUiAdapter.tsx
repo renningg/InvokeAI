@@ -8,7 +8,14 @@ import {
   invalidateGallery,
   invalidateGalleryBoardDestinations,
 } from '@features/gallery/queries';
-import { createDefaultVideoWidgetValues, normalizeVideoWidgetValues, VideoUiProvider } from '@features/video';
+import {
+  cancelReferenceSelection,
+  createDefaultVideoWidgetValues,
+  normalizeVideoWidgetValues,
+  VideoUiProvider,
+} from '@features/video';
+import { useMountEffect } from '@platform/react/useMountEffect';
+import { captureAccountScope } from '@platform/state/accountLifecycle';
 import { useQueryClient } from '@tanstack/react-query';
 import { useFindGalleryItem } from '@workbench/image-actions/useFindGalleryItem';
 import { useWorkbenchPreferenceSelector } from '@workbench/settings/store';
@@ -28,6 +35,15 @@ import {
 } from '@workbench/WorkbenchContext';
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 
+// This project owner stays mounted while individual widget panels are hidden by Activity.
+const VideoReferenceSelectionLifetime = ({ projectId }: { projectId: string }) => {
+  useMountEffect(() => {
+    const owner = captureAccountScope();
+    return () => cancelReferenceSelection(owner, projectId);
+  });
+  return null;
+};
+
 /** Video owns its prompt in widget values; do not join the draft shared by Generate/Upscale. */
 export const VideoUiAdapterProvider = ({ children }: { children: ReactNode }) => {
   const project = useActiveProjectSelector(
@@ -35,11 +51,13 @@ export const VideoUiAdapterProvider = ({ children }: { children: ReactNode }) =>
       const instance = Object.values(activeProject.widgetInstances).find((candidate) => candidate.typeId === 'video');
 
       return {
+        instanceId: instance?.id,
         projectId: activeProject.id,
         rawValues: instance?.state.values ?? {},
       };
     },
-    (left, right) => left.projectId === right.projectId && left.rawValues === right.rawValues
+    (left, right) =>
+      left.projectId === right.projectId && left.instanceId === right.instanceId && left.rawValues === right.rawValues
   );
   // Syntax highlighting is an account preference, not project data.
   const showPromptSyntaxHighlighting = useWorkbenchPreferenceSelector(
@@ -162,7 +180,12 @@ export const VideoUiAdapterProvider = ({ children }: { children: ReactNode }) =>
     ]
   );
 
-  return <VideoUiProvider adapter={adapter}>{children}</VideoUiProvider>;
+  return (
+    <VideoUiProvider adapter={adapter}>
+      <VideoReferenceSelectionLifetime key={JSON.stringify([projectId, project.instanceId])} projectId={projectId} />
+      {children}
+    </VideoUiProvider>
+  );
 };
 
 // The module-scoped player report permits one stable port across project switches.
